@@ -538,24 +538,22 @@ impl LarkChannel {
 
     async fn try_mark_event_key_seen(&self, dedupe_key: &str) -> bool {
         let now = Instant::now();
-        if self.recent_event_keys.read().await.contains_key(dedupe_key) {
-            return false;
-        }
-
         let should_cleanup = {
             let last_cleanup = self.recent_event_cleanup_at.read().await;
             now.duration_since(*last_cleanup) >= LARK_EVENT_DEDUP_CLEANUP_INTERVAL
         };
 
         let mut seen = self.recent_event_keys.write().await;
-        if seen.contains_key(dedupe_key) {
-            return false;
-        }
-
         if should_cleanup {
             seen.retain(|_, t| now.duration_since(*t) < LARK_EVENT_DEDUP_TTL);
             let mut last_cleanup = self.recent_event_cleanup_at.write().await;
             *last_cleanup = now;
+        }
+
+        if let Some(seen_at) = seen.get(dedupe_key) {
+            if now.duration_since(*seen_at) < LARK_EVENT_DEDUP_TTL {
+                return false;
+            }
         }
 
         seen.insert(dedupe_key.to_string(), now);
@@ -2465,6 +2463,33 @@ mod tests {
         let seen = ch.recent_event_keys.read().await;
         assert!(!seen.contains_key("event:stale"));
         assert!(seen.contains_key("event:fresh"));
+    }
+
+    #[tokio::test]
+    async fn try_mark_event_key_seen_allows_same_key_after_ttl() {
+        let ch = LarkChannel::new(
+            "id".into(),
+            "secret".into(),
+            "token".into(),
+            None,
+            vec!["*".into()],
+            true,
+        );
+
+        {
+            let mut seen = ch.recent_event_keys.write().await;
+            seen.insert(
+                "event:repeat".to_string(),
+                Instant::now() - LARK_EVENT_DEDUP_TTL - Duration::from_secs(5),
+            );
+        }
+        {
+            let mut cleanup_at = ch.recent_event_cleanup_at.write().await;
+            *cleanup_at =
+                Instant::now() - LARK_EVENT_DEDUP_CLEANUP_INTERVAL - Duration::from_secs(1);
+        }
+
+        assert!(ch.try_mark_event_key_seen("event:repeat").await);
     }
 
     #[test]
