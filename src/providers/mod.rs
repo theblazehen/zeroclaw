@@ -85,6 +85,7 @@ const ZAI_CN_BASE_URL: &str = "https://open.bigmodel.cn/api/coding/paas/v4";
 const SILICONFLOW_BASE_URL: &str = "https://api.siliconflow.cn/v1";
 const STEPFUN_BASE_URL: &str = "https://api.stepfun.com/v1";
 const VERCEL_AI_GATEWAY_BASE_URL: &str = "https://ai-gateway.vercel.sh/v1";
+const LITELLM_BASE_URL: &str = "http://localhost:4000/v1";
 
 #[derive(Clone, Debug)]
 pub struct ProviderDescriptor {
@@ -109,6 +110,7 @@ fn canonical_registry_name(name: &str) -> &str {
         "grok" => "xai",
         "together-ai" => "together",
         "fireworks-ai" => "fireworks",
+        "lite-llm" => "litellm",
         "nvidia-nim" | "build.nvidia.com" => "nvidia",
         _ => name,
     }
@@ -299,6 +301,16 @@ static PROVIDER_REGISTRY: &[ProviderDescriptor] = &[
         canonical_name: "vllm",
         display_name: "vLLM",
         base_url: Some("http://localhost:8000/v1"),
+        auth_style: AuthStyle::Bearer,
+        supports_vision: false,
+        no_responses_fallback: false,
+        merge_system_into_user: false,
+        user_agent: None,
+    },
+    ProviderDescriptor {
+        canonical_name: "litellm",
+        display_name: "LiteLLM",
+        base_url: Some(LITELLM_BASE_URL),
         auth_style: AuthStyle::Bearer,
         supports_vision: false,
         no_responses_fallback: false,
@@ -1336,6 +1348,7 @@ fn resolve_provider_credential(name: &str, credential_override: Option<&str>) ->
         "llamacpp" | "llama.cpp" => vec!["LLAMACPP_API_KEY"],
         "sglang" => vec!["SGLANG_API_KEY"],
         "vllm" => vec!["VLLM_API_KEY"],
+        "litellm" | "lite-llm" => vec!["LITELLM_API_KEY"],
         "osaurus" => vec!["OSAURUS_API_KEY"],
         "telnyx" => vec!["TELNYX_API_KEY"],
         _ => vec![],
@@ -1702,6 +1715,18 @@ fn create_provider_with_url_and_options(
                 .unwrap_or("http://localhost:8000/v1");
             Ok(Box::new(OpenAiCompatibleProvider::new(
                 "vLLM",
+                base_url,
+                key,
+                AuthStyle::Bearer,
+            )))
+        }
+        "litellm" | "lite-llm" => {
+            let base_url = api_url
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(LITELLM_BASE_URL);
+            Ok(Box::new(OpenAiCompatibleProvider::new(
+                "LiteLLM",
                 base_url,
                 key,
                 AuthStyle::Bearer,
@@ -2321,6 +2346,12 @@ pub fn list_providers() -> Vec<ProviderInfo> {
             local: true,
         },
         ProviderInfo {
+            name: "litellm",
+            display_name: "LiteLLM",
+            aliases: &["lite-llm"],
+            local: true,
+        },
+        ProviderInfo {
             name: "osaurus",
             display_name: "Osaurus",
             aliases: &[],
@@ -2463,6 +2494,18 @@ mod tests {
 
         let resolved = resolve_provider_credential("novita", None);
         assert_eq!(resolved.as_deref(), Some("novita-key"));
+    }
+
+    #[test]
+    fn resolve_provider_credential_uses_litellm_env_key() {
+        let _env_lock = env_lock();
+        let _litellm_guard = EnvGuard::set("LITELLM_API_KEY", Some("litellm-key"));
+
+        let resolved = resolve_provider_credential("litellm", None);
+        assert_eq!(resolved.as_deref(), Some("litellm-key"));
+
+        let alias_resolved = resolve_provider_credential("lite-llm", None);
+        assert_eq!(alias_resolved.as_deref(), Some("litellm-key"));
     }
 
     #[test]
@@ -2676,6 +2719,7 @@ mod tests {
             ("grok", "xai"),
             ("together-ai", "together"),
             ("fireworks-ai", "fireworks"),
+            ("lite-llm", "litellm"),
             ("nvidia-nim", "nvidia"),
             ("build.nvidia.com", "nvidia"),
             ("tencent", "hunyuan"),
@@ -2986,6 +3030,25 @@ mod tests {
     fn factory_vllm() {
         assert!(create_provider("vllm", None).is_ok());
         assert!(create_provider("vllm", Some("key")).is_ok());
+    }
+
+    #[test]
+    fn factory_litellm() {
+        assert!(create_provider("litellm", None).is_ok());
+        assert!(create_provider("litellm", Some("key")).is_ok());
+        assert!(create_provider("lite-llm", Some("key")).is_ok());
+    }
+
+    #[test]
+    fn factory_litellm_custom_url() {
+        let options = ProviderRuntimeOptions::default();
+        let provider = create_provider_with_url_and_options(
+            "litellm",
+            Some("key"),
+            Some("https://litellm.example.com/v1"),
+            &options,
+        );
+        assert!(provider.is_ok());
     }
 
     #[test]
