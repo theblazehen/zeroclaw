@@ -2,7 +2,7 @@
 
 Describe this PR in 2-5 bullets:
 
-- Base branch target (`main` or `dev`; direct `main` PRs are allowed):
+- Base branch target (`main` by default; use `dev` only when maintainers explicitly request integration batching):
 - Problem:
 - Why it matters:
 - What changed:
@@ -27,6 +27,7 @@ Describe this PR in 2-5 bullets:
 - Closes #
 - Related #
 - Depends on # (if stacked)
+- Existing overlapping PR(s) reviewed for this issue (list `#<pr> by @<author>` or `N/A`):
 - Supersedes # (if replacing older PR)
 - Linear issue key(s) (required, e.g. `RMN-123`):
 - Linear issue URL(s):

@@ -113,6 +113,8 @@ Maintain these branch protection rules on `dev` and `main`:
 ### 4.1 Step A: Intake
 
 - Contributor opens PR with full `.github/pull_request_template.md`.
+- Normal contributor PR base is `main` by default; use `dev` only when maintainers explicitly request integration batching.
+- If an issue already has open community PRs, reviewers/maintainers must acknowledge overlap and either continue that thread or document supersede rationale.
 - `PR Labeler` applies scope/path labels + size labels + risk labels + module labels (for example `channel:telegram`, `provider:kimi`, `tool:shell`) and contributor tiers by merged PR count (`trusted` >=5, `experienced` >=10, `principal` >=20, `distinguished` >=50), while de-duplicating less-specific scope labels when a more specific module label is present.
 - For all module prefixes, module labels are compacted to reduce noise: one specific module keeps `prefix:component`, but multiple specifics collapse to the base scope label `prefix`.
 - Label ordering is priority-first: `risk:*` -> `size:*` -> contributor tier -> module/path labels.
@@ -227,6 +229,7 @@ We do **not** require contributors to quantify AI-vs-human line ownership.
 ### 8.2 Backlog pressure controls
 
 - If a new PR replaces an older open PR, require `Supersedes #...` and close the older one after maintainer confirmation.
+- Replacement PRs must include attribution for materially integrated community work and explicitly state what was not carried forward.
 - Mark dormant/redundant PRs with `stale-candidate` or `superseded` to reduce duplicate review effort.
 
 ### 8.3 Issue triage discipline
