@@ -9,7 +9,7 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
 
 /// Maximum output bytes kept per stream (stdout/stderr): 512KB.
@@ -75,6 +75,8 @@ impl ProcessTool {
                 error: Some("Runtime does not support long-running processes".into()),
             });
         }
+
+        self.prune_exited_processes();
 
         let command = args
             .get("command")
@@ -180,7 +182,16 @@ impl ProcessTool {
             }
         };
 
-        let pid = child.id().unwrap_or(0);
+        let Some(pid) = child.id() else {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(
+                    "Failed to capture process PID for spawned child; process was not tracked"
+                        .into(),
+                ),
+            });
+        };
 
         // Set up background output readers.
         let stdout_buf = Arc::new(Mutex::new(OutputBuffer::default()));
@@ -236,6 +247,8 @@ impl ProcessTool {
                 error: Some(e),
             });
         }
+
+        self.prune_exited_processes();
 
         let processes = self.processes.read().unwrap();
         let mut entries = Vec::new();
@@ -333,7 +346,7 @@ impl ProcessTool {
         })
     }
 
-    fn handle_kill(&self, args: &serde_json::Value) -> anyhow::Result<ToolResult> {
+    async fn handle_kill(&self, args: &serde_json::Value) -> anyhow::Result<ToolResult> {
         if let Err(e) = self
             .security
             .enforce_tool_operation(ToolOperation::Act, "process")
@@ -347,44 +360,90 @@ impl ProcessTool {
 
         let id = parse_id(args, "kill")?;
 
-        let pid = {
-            let processes = self.processes.read().unwrap();
-            match processes.get(&id) {
-                Some(entry) => entry.pid,
-                None => {
-                    return Ok(ToolResult {
-                        success: false,
-                        output: String::new(),
-                        error: Some(format!("No process with id {id}")),
-                    });
-                }
-            }
+        let entry = {
+            let mut processes = self.processes.write().unwrap();
+            processes.remove(&id)
         };
 
-        // Send SIGTERM via kill command.
-        let kill_result = std::process::Command::new("kill")
-            .arg(pid.to_string())
-            .output();
-
-        match kill_result {
-            Ok(output) if output.status.success() => Ok(ToolResult {
-                success: true,
-                output: format!("Sent SIGTERM to process {id} (pid {pid})"),
-                error: None,
-            }),
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                Ok(ToolResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some(format!("Failed to kill process {id} (pid {pid}): {stderr}")),
-                })
-            }
-            Err(e) => Ok(ToolResult {
+        let Some(entry) = entry else {
+            return Ok(ToolResult {
                 success: false,
                 output: String::new(),
-                error: Some(format!("Failed to execute kill command: {e}")),
+                error: Some(format!("No process with id {id}")),
+            });
+        };
+
+        let pid = entry.pid;
+        let mut child = match entry.child.into_inner() {
+            Ok(child) => child,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        if let Ok(Some(status)) = child.try_wait() {
+            return Ok(ToolResult {
+                success: true,
+                output: format!(
+                    "Process {id} (pid {pid}) already exited with status {:?}",
+                    status.code()
+                ),
+                error: None,
+            });
+        }
+
+        if let Err(e) = child.start_kill() {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(format!(
+                    "Failed to initiate termination for process {id} (pid {pid}): {e}"
+                )),
+            });
+        }
+
+        match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+            Ok(Ok(status)) => Ok(ToolResult {
+                success: true,
+                output: format!(
+                    "Terminated process {id} (pid {pid}) with exit status {:?}",
+                    status.code()
+                ),
+                error: None,
             }),
+            Ok(Err(e)) => Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(format!("Failed waiting for process {id} (pid {pid}) to exit: {e}")),
+            }),
+            Err(_) => Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(format!(
+                    "Timed out waiting for process {id} (pid {pid}) to exit after termination signal"
+                )),
+            }),
+        }
+    }
+
+    fn prune_exited_processes(&self) {
+        let mut to_remove = Vec::new();
+        {
+            let processes = self.processes.read().unwrap();
+            for (id, entry) in processes.iter() {
+                if let Ok(mut child) = entry.child.lock() {
+                    if matches!(child.try_wait(), Ok(Some(_))) {
+                        to_remove.push(*id);
+                    }
+                }
+            }
+        }
+
+        if to_remove.is_empty() {
+            return;
+        }
+
+        let mut processes = self.processes.write().unwrap();
+        for id in to_remove {
+            processes.remove(&id);
         }
     }
 }
@@ -507,7 +566,7 @@ impl Tool for ProcessTool {
             "spawn" => self.handle_spawn(&args),
             "list" => self.handle_list(),
             "output" => self.handle_output(&args),
-            "kill" => self.handle_kill(&args),
+            "kill" => self.handle_kill(&args).await,
             other => Ok(ToolResult {
                 success: false,
                 output: String::new(),
@@ -630,6 +689,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_prunes_exited_processes() {
+        let tool = make_tool();
+        let spawn_result = tool
+            .execute(json!({
+                "action": "spawn",
+                "command": "echo prune_test"
+            }))
+            .await
+            .unwrap();
+        assert!(spawn_result.success);
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        let list_result = tool.execute(json!({"action": "list"})).await.unwrap();
+        assert!(list_result.success);
+        let entries: Vec<serde_json::Value> = serde_json::from_str(&list_result.output).unwrap();
+        assert!(
+            !entries
+                .iter()
+                .any(|entry| entry["command"].as_str() == Some("echo prune_test")),
+            "exited process entries should be pruned during list()"
+        );
+    }
+
+    #[tokio::test]
     async fn output_returns_stdout() {
         let tool = make_tool();
         let spawn_result = tool
@@ -680,6 +764,39 @@ mod tests {
             .await
             .unwrap();
         assert!(kill_result.success);
+    }
+
+    #[tokio::test]
+    async fn kill_removes_process_entry() {
+        let tool = make_tool();
+        let spawn_result = tool
+            .execute(json!({
+                "action": "spawn",
+                "command": "sleep 60"
+            }))
+            .await
+            .unwrap();
+        assert!(spawn_result.success);
+
+        let spawn_output: serde_json::Value = serde_json::from_str(&spawn_result.output).unwrap();
+        let id = spawn_output["id"].as_u64().unwrap();
+
+        let kill_result = tool
+            .execute(json!({
+                "action": "kill",
+                "id": id
+            }))
+            .await
+            .unwrap();
+        assert!(kill_result.success);
+
+        let list_result = tool.execute(json!({"action": "list"})).await.unwrap();
+        assert!(list_result.success);
+        let entries: Vec<serde_json::Value> = serde_json::from_str(&list_result.output).unwrap();
+        assert!(
+            !entries.iter().any(|entry| entry["id"].as_u64() == Some(id)),
+            "killed process should no longer be listed"
+        );
     }
 
     #[tokio::test]
