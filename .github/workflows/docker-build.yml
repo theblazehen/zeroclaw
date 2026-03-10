@@ -60,6 +60,6 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           # Enable optional features at build time
           build-args: |
-            ZEROCLAW_FEATURES=whatsapp-web,browser-native
+            ZEROCLAW_FEATURES=whatsapp-web,browser-native,memory-graph
           cache-from: type=gha
           cache-to: type=gha,mode=max
