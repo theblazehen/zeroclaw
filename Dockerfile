@@ -5,6 +5,9 @@ FROM rust:1.93-slim@sha256:9663b80a1621253d30b146454f903de48f0af925c967be48c8474
 
 WORKDIR /app
 
+# Custom features to enable (e.g. whatsapp-web)
+ARG ZEROCLAW_FEATURES=""
+
 # Install build dependencies
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
@@ -52,7 +55,7 @@ RUN mkdir -p web/dist && \
 RUN --mount=type=cache,id=zeroclaw-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=zeroclaw-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=zeroclaw-target,target=/app/target,sharing=locked \
-    cargo build --release --locked && \
+    cargo build --release --locked $([ -n "$ZEROCLAW_FEATURES" ] && echo "--features $ZEROCLAW_FEATURES") && \
     cp target/release/zeroclaw /app/zeroclaw && \
     strip /app/zeroclaw
 
@@ -80,26 +83,18 @@ FROM debian:trixie-slim@sha256:f6e2cfac5cf956ea044b4bd75e6397b4372ad88fe00908045
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     curl \
+    git \
+    openssh-client \
+    jq \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /zeroclaw-data /zeroclaw-data
 COPY --from=builder /app/zeroclaw /usr/local/bin/zeroclaw
 
-# Overwrite minimal config with DEV template (Ollama defaults)
-COPY dev/config.template.toml /zeroclaw-data/.zeroclaw/config.toml
-RUN chown 65534:65534 /zeroclaw-data/.zeroclaw/config.toml
-
 # Environment setup
-# Use consistent workspace path
 ENV ZEROCLAW_WORKSPACE=/zeroclaw-data/workspace
 ENV HOME=/zeroclaw-data
-# Defaults for local dev (Ollama) - matches config.template.toml
-ENV PROVIDER="ollama"
-ENV ZEROCLAW_MODEL="llama3.2"
 ENV ZEROCLAW_GATEWAY_PORT=42617
-
-# Note: API_KEY is intentionally NOT set here to avoid confusion.
-# It is set in config.toml as the Ollama URL.
 
 WORKDIR /zeroclaw-data
 USER 65534:65534
