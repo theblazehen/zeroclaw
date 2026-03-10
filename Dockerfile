@@ -90,6 +90,14 @@ RUN apt-get update && apt-get install -y \
     chromium-driver \
     && rm -rf /var/lib/apt/lists/*
 
+# GitHub CLI (for agent self-modification workflow)
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      -o /usr/share/keyrings/githubcli-archive-keyring.gpg && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      > /etc/apt/sources.list.d/github-cli.list && \
+    apt-get update && apt-get install -y gh && \
+    rm -rf /var/lib/apt/lists/*
+
 COPY --from=builder /zeroclaw-data /zeroclaw-data
 COPY --from=builder /app/zeroclaw /usr/local/bin/zeroclaw
 
@@ -102,6 +110,11 @@ ENV WEBDRIVER_URL=http://localhost:9515
 ENV CHROME_BIN=/usr/bin/chromium
 
 WORKDIR /zeroclaw-data
+
+# Symlink gh config to persistent volume so auth survives restarts
+RUN mkdir -p /root/.config && \
+    ln -sf /zeroclaw-data/.config/gh /root/.config/gh
+
 # Run as root — agent needs full control of its container
 EXPOSE 42617
 ENTRYPOINT ["zeroclaw"]
