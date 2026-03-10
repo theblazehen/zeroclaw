@@ -2,6 +2,10 @@ pub mod backend;
 pub mod chunker;
 pub mod cli;
 pub mod embeddings;
+#[cfg(feature = "memory-graph")]
+pub mod graph;
+#[cfg(feature = "memory-graph")]
+pub mod graph_extract;
 pub mod hygiene;
 pub mod lucid;
 pub mod markdown;
@@ -20,6 +24,10 @@ pub use backend::{
     classify_memory_backend, default_memory_backend_key, memory_backend_profile,
     selectable_memory_backends, MemoryBackendKind, MemoryBackendProfile,
 };
+#[cfg(feature = "memory-graph")]
+pub use graph::KnowledgeGraph;
+#[cfg(feature = "memory-graph")]
+pub use graph_extract::{extract_and_store, extract_recall_entities, format_graph_context};
 pub use lucid::LucidMemory;
 pub use markdown::MarkdownMemory;
 pub use none::NoneMemory;

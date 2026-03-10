@@ -1697,6 +1697,55 @@ impl Default for QdrantConfig {
     }
 }
 
+/// Configuration for the embedded knowledge graph (`[memory.graph]`).
+///
+/// Enables an in-process SQLite knowledge graph stored in `brain.db`
+/// alongside existing memories. Requires compile-time feature `memory-graph`
+/// to activate; the config struct is always present so TOML parsing
+/// succeeds regardless of features.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct GraphConfig {
+    /// Enable the knowledge graph.
+    pub enabled: bool,
+    /// LLM model for entity extraction (cheap/fast model recommended).
+    pub extraction_model: String,
+    /// Extraction mode: `"async"` (background after each turn) or `"disabled"` (tools only).
+    pub extraction_mode: String,
+    /// Maximum entities to extract from a user message for recall.
+    pub max_recall_entities: usize,
+    /// Maximum relationship hops to traverse during recall.
+    pub max_recall_hops: usize,
+}
+
+fn default_graph_extraction_model() -> String {
+    "alias/haiku".into()
+}
+
+fn default_graph_extraction_mode() -> String {
+    "async".into()
+}
+
+fn default_graph_max_recall_entities() -> usize {
+    5
+}
+
+fn default_graph_max_recall_hops() -> usize {
+    1
+}
+
+impl Default for GraphConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            extraction_model: default_graph_extraction_model(),
+            extraction_mode: default_graph_extraction_mode(),
+            max_recall_entities: default_graph_max_recall_entities(),
+            max_recall_hops: default_graph_max_recall_hops(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct MemoryConfig {
@@ -1779,6 +1828,12 @@ pub struct MemoryConfig {
     /// Only used when `backend = "qdrant"`.
     #[serde(default)]
     pub qdrant: QdrantConfig,
+
+    // ── Knowledge graph ────────────────────────────────────────
+    /// Embedded knowledge graph configuration (`[memory.graph]`).
+    /// Always parsed; only active when compiled with `--features memory-graph`.
+    #[serde(default)]
+    pub graph: Option<GraphConfig>,
 }
 
 fn default_embedding_provider() -> String {
@@ -1849,6 +1904,7 @@ impl Default for MemoryConfig {
             auto_hydrate: true,
             sqlite_open_timeout_secs: None,
             qdrant: QdrantConfig::default(),
+            graph: None,
         }
     }
 }

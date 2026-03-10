@@ -189,6 +189,7 @@ hardware = ["nusb", "tokio-serial"]
 channel-matrix = ["dep:matrix-sdk"]
 channel-lark = ["dep:prost"]
 memory-postgres = ["dep:postgres"]
+memory-graph = []
 observability-otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp"]
 peripheral-rpi = ["rppal"]
 # Browser backend feature alias used by cfg(feature = "browser-native")

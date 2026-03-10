@@ -32,6 +32,10 @@ pub mod file_read;
 pub mod file_write;
 pub mod git_operations;
 pub mod glob_search;
+#[cfg(feature = "memory-graph")]
+pub mod graph_query;
+#[cfg(feature = "memory-graph")]
+pub mod graph_store;
 #[cfg(feature = "hardware")]
 pub mod hardware_board_info;
 #[cfg(feature = "hardware")]
@@ -71,6 +75,10 @@ pub use file_read::FileReadTool;
 pub use file_write::FileWriteTool;
 pub use git_operations::GitOperationsTool;
 pub use glob_search::GlobSearchTool;
+#[cfg(feature = "memory-graph")]
+pub use graph_query::GraphQueryTool;
+#[cfg(feature = "memory-graph")]
+pub use graph_store::GraphStoreTool;
 #[cfg(feature = "hardware")]
 pub use hardware_board_info::HardwareBoardInfoTool;
 #[cfg(feature = "hardware")]
@@ -295,6 +303,27 @@ pub fn all_tools_with_runtime(
             root_config.web_search.max_results,
             root_config.web_search.timeout_secs,
         )));
+    }
+
+    // Knowledge graph tools (compile-time gate + runtime config check)
+    #[cfg(feature = "memory-graph")]
+    if let Some(ref graph_config) = root_config.memory.graph {
+        if graph_config.enabled {
+            let db_path = workspace_dir.join("memory").join("brain.db");
+            match crate::memory::graph::KnowledgeGraph::new(&db_path) {
+                Ok(kg) => {
+                    let graph_db = Arc::new(kg);
+                    tool_arcs.push(Arc::new(GraphQueryTool::new(Arc::clone(&graph_db))));
+                    tool_arcs.push(Arc::new(GraphStoreTool::new(
+                        Arc::clone(&graph_db),
+                        security.clone(),
+                    )));
+                }
+                Err(e) => {
+                    tracing::error!("Failed to initialize knowledge graph for tools: {e}");
+                }
+            }
+        }
     }
 
     // PDF extraction (feature-gated at compile time via rag-pdf)
