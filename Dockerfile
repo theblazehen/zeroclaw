@@ -79,13 +79,15 @@ EOF
 # ── Stage 2: Development Runtime (Debian) ────────────────────
 FROM debian:trixie-slim@sha256:f6e2cfac5cf956ea044b4bd75e6397b4372ad88fe00908045e9a0d21712ae3ba AS dev
 
-# Install essential runtime dependencies only (use docker-compose.override.yml for dev tools)
+# Runtime dependencies: agent tools + browser automation
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     curl \
     git \
     openssh-client \
     jq \
+    chromium \
+    chromium-driver \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /zeroclaw-data /zeroclaw-data
@@ -93,11 +95,14 @@ COPY --from=builder /app/zeroclaw /usr/local/bin/zeroclaw
 
 # Environment setup
 ENV ZEROCLAW_WORKSPACE=/zeroclaw-data/workspace
-ENV HOME=/zeroclaw-data
+ENV HOME=/root
 ENV ZEROCLAW_GATEWAY_PORT=42617
+# browser-native (fantoccini) needs a WebDriver
+ENV WEBDRIVER_URL=http://localhost:9515
+ENV CHROME_BIN=/usr/bin/chromium
 
 WORKDIR /zeroclaw-data
-USER 65534:65534
+# Run as root — agent needs full control of its container
 EXPOSE 42617
 ENTRYPOINT ["zeroclaw"]
 CMD ["gateway"]
