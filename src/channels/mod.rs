@@ -67,6 +67,9 @@ pub use whatsapp::WhatsAppChannel;
 #[cfg(feature = "whatsapp-web")]
 pub use whatsapp_web::WhatsAppWebChannel;
 
+#[cfg(feature = "memory-graph")]
+use crate::memory::graph::KnowledgeGraph;
+
 use crate::agent::loop_::{build_tool_instructions, run_tool_call_loop, scrub_credentials};
 use crate::config::Config;
 use crate::identity;
@@ -224,6 +227,10 @@ struct ChannelRuntimeContext {
     multimodal: crate::config::MultimodalConfig,
     hooks: Option<Arc<crate::hooks::HookRunner>>,
     non_cli_excluded_tools: Arc<Vec<String>>,
+    #[cfg(feature = "memory-graph")]
+    knowledge_graph: Option<Arc<KnowledgeGraph>>,
+    #[cfg(feature = "memory-graph")]
+    graph_config: Option<crate::config::GraphConfig>,
 }
 
 #[derive(Clone)]
@@ -1613,14 +1620,36 @@ async fn process_channel_message(
         .unwrap_or_default();
     let mut prior_turns = normalize_cached_channel_turns(prior_turns_raw);
 
-    // Only enrich with memory context when there is no prior conversation
+    // Only enrich with memory/graph context when there is no prior conversation
     // history. Follow-up turns already include context from previous messages.
     if !had_prior_history {
         let memory_context =
             build_memory_context(ctx.memory.as_ref(), &msg.content, ctx.min_relevance_score).await;
+
+        // Knowledge graph recall: extract entities from user message, look up connections
+        #[cfg(feature = "memory-graph")]
+        let graph_context =
+            if let (Some(graph), Some(gcfg)) = (&ctx.knowledge_graph, &ctx.graph_config) {
+                crate::memory::graph_extract::build_recall_context(
+                    graph,
+                    ctx.provider.as_ref(),
+                    &gcfg.extraction_model,
+                    &msg.content,
+                    gcfg.max_recall_entities,
+                    gcfg.max_recall_hops,
+                )
+                .await
+            } else {
+                String::new()
+            };
+        #[cfg(not(feature = "memory-graph"))]
+        let graph_context = String::new();
+
+        let combined_context = format!("{graph_context}{memory_context}");
+
         if let Some(last_turn) = prior_turns.last_mut() {
-            if last_turn.role == "user" && !memory_context.is_empty() {
-                last_turn.content = format!("{memory_context}{}", msg.content);
+            if last_turn.role == "user" && !combined_context.is_empty() {
+                last_turn.content = format!("{combined_context}{}", msg.content);
             }
         }
     }
@@ -1898,6 +1927,36 @@ async fn process_channel_message(
                 &history_key,
                 ChatMessage::assistant(&history_response),
             );
+
+            // Async post-turn knowledge graph extraction
+            #[cfg(feature = "memory-graph")]
+            {
+                if let (Some(ref graph), Some(ref gcfg)) = (&ctx.knowledge_graph, &ctx.graph_config)
+                {
+                    if gcfg.extraction_mode == "async" {
+                        let graph = Arc::clone(graph);
+                        let provider = Arc::clone(&ctx.provider);
+                        let model = gcfg.extraction_model.clone();
+                        let conversation = vec![
+                            format!("User: {}", msg.content),
+                            format!("Assistant: {}", delivered_response),
+                        ];
+                        tokio::spawn(async move {
+                            if let Err(e) = crate::memory::graph_extract::extract_and_store(
+                                &graph,
+                                provider.as_ref(),
+                                &model,
+                                &conversation,
+                            )
+                            .await
+                            {
+                                tracing::debug!("Graph post-turn extraction failed: {e}");
+                            }
+                        });
+                    }
+                }
+            }
+
             println!(
                 "  🤖 Reply ({}ms): {}",
                 started_at.elapsed().as_millis(),
@@ -3287,6 +3346,27 @@ pub async fn start_channels(config: Config) -> Result<()> {
         .as_ref()
         .is_some_and(|tg| tg.interrupt_on_new_message);
 
+    // ── Knowledge graph (agent loop hooks) ─────────────────────────
+    #[cfg(feature = "memory-graph")]
+    let knowledge_graph: Option<Arc<KnowledgeGraph>> = config
+        .memory
+        .graph
+        .as_ref()
+        .filter(|g| g.enabled)
+        .and_then(|_| {
+            let db_path = workspace.join("memory").join("brain.db");
+            match KnowledgeGraph::new(&db_path) {
+                Ok(kg) => {
+                    tracing::info!("🕸️ Knowledge graph initialized for agent loop");
+                    Some(Arc::new(kg))
+                }
+                Err(e) => {
+                    tracing::error!("Failed to initialize knowledge graph for agent loop: {e}");
+                    None
+                }
+            }
+        });
+
     let runtime_ctx = Arc::new(ChannelRuntimeContext {
         channels_by_name,
         provider: Arc::clone(&provider),
@@ -3321,6 +3401,10 @@ pub async fn start_channels(config: Config) -> Result<()> {
             None
         },
         non_cli_excluded_tools: Arc::new(config.autonomy.non_cli_excluded_tools.clone()),
+        #[cfg(feature = "memory-graph")]
+        knowledge_graph,
+        #[cfg(feature = "memory-graph")]
+        graph_config: config.memory.graph.clone().filter(|g| g.enabled),
     });
 
     run_message_dispatch_loop(rx, runtime_ctx, max_in_flight_messages).await;
@@ -3534,6 +3618,10 @@ mod tests {
             workspace_dir: Arc::new(std::env::temp_dir()),
             message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
             non_cli_excluded_tools: Arc::new(Vec::new()),
+            #[cfg(feature = "memory-graph")]
+            knowledge_graph: None,
+            #[cfg(feature = "memory-graph")]
+            graph_config: None,
         };
 
         assert!(compact_sender_history(&ctx, &sender));
@@ -3583,6 +3671,10 @@ mod tests {
             workspace_dir: Arc::new(std::env::temp_dir()),
             message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
             non_cli_excluded_tools: Arc::new(Vec::new()),
+            #[cfg(feature = "memory-graph")]
+            knowledge_graph: None,
+            #[cfg(feature = "memory-graph")]
+            graph_config: None,
         };
 
         append_sender_turn(&ctx, &sender, ChatMessage::user("hello"));
@@ -3635,6 +3727,10 @@ mod tests {
             workspace_dir: Arc::new(std::env::temp_dir()),
             message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
             non_cli_excluded_tools: Arc::new(Vec::new()),
+            #[cfg(feature = "memory-graph")]
+            knowledge_graph: None,
+            #[cfg(feature = "memory-graph")]
+            graph_config: None,
         };
 
         assert!(rollback_orphan_user_turn(&ctx, &sender, "pending"));
@@ -4110,6 +4206,10 @@ BTC is currently around $65,000 based on latest tool output."#
             non_cli_excluded_tools: Arc::new(Vec::new()),
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
+            #[cfg(feature = "memory-graph")]
+            knowledge_graph: None,
+            #[cfg(feature = "memory-graph")]
+            graph_config: None,
         });
 
         process_channel_message(
@@ -4169,6 +4269,10 @@ BTC is currently around $65,000 based on latest tool output."#
             non_cli_excluded_tools: Arc::new(Vec::new()),
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
+            #[cfg(feature = "memory-graph")]
+            knowledge_graph: None,
+            #[cfg(feature = "memory-graph")]
+            graph_config: None,
         });
 
         process_channel_message(
@@ -4242,6 +4346,10 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
+            #[cfg(feature = "memory-graph")]
+            knowledge_graph: None,
+            #[cfg(feature = "memory-graph")]
+            graph_config: None,
         });
 
         process_channel_message(
@@ -4301,6 +4409,10 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
+            #[cfg(feature = "memory-graph")]
+            knowledge_graph: None,
+            #[cfg(feature = "memory-graph")]
+            graph_config: None,
         });
 
         process_channel_message(
@@ -4369,6 +4481,10 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
+            #[cfg(feature = "memory-graph")]
+            knowledge_graph: None,
+            #[cfg(feature = "memory-graph")]
+            graph_config: None,
         });
 
         process_channel_message(
@@ -4458,6 +4574,10 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
+            #[cfg(feature = "memory-graph")]
+            knowledge_graph: None,
+            #[cfg(feature = "memory-graph")]
+            graph_config: None,
         });
 
         process_channel_message(
@@ -4529,6 +4649,10 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
+            #[cfg(feature = "memory-graph")]
+            knowledge_graph: None,
+            #[cfg(feature = "memory-graph")]
+            graph_config: None,
         });
 
         process_channel_message(
@@ -4615,6 +4739,10 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
+            #[cfg(feature = "memory-graph")]
+            knowledge_graph: None,
+            #[cfg(feature = "memory-graph")]
+            graph_config: None,
         });
 
         process_channel_message(
@@ -4686,6 +4814,10 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
+            #[cfg(feature = "memory-graph")]
+            knowledge_graph: None,
+            #[cfg(feature = "memory-graph")]
+            graph_config: None,
         });
 
         process_channel_message(
@@ -4746,6 +4878,10 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
+            #[cfg(feature = "memory-graph")]
+            knowledge_graph: None,
+            #[cfg(feature = "memory-graph")]
+            graph_config: None,
         });
 
         process_channel_message(
@@ -4917,6 +5053,10 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
+            #[cfg(feature = "memory-graph")]
+            knowledge_graph: None,
+            #[cfg(feature = "memory-graph")]
+            graph_config: None,
         });
 
         let (tx, rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(4);
@@ -4997,6 +5137,10 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
+            #[cfg(feature = "memory-graph")]
+            knowledge_graph: None,
+            #[cfg(feature = "memory-graph")]
+            graph_config: None,
         });
 
         let (tx, rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(8);
@@ -5089,6 +5233,10 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
+            #[cfg(feature = "memory-graph")]
+            knowledge_graph: None,
+            #[cfg(feature = "memory-graph")]
+            graph_config: None,
         });
 
         let (tx, rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(8);
@@ -5163,6 +5311,10 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
+            #[cfg(feature = "memory-graph")]
+            knowledge_graph: None,
+            #[cfg(feature = "memory-graph")]
+            graph_config: None,
         });
 
         process_channel_message(
@@ -5222,6 +5374,10 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
+            #[cfg(feature = "memory-graph")]
+            knowledge_graph: None,
+            #[cfg(feature = "memory-graph")]
+            graph_config: None,
         });
 
         process_channel_message(
@@ -5738,6 +5894,10 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
+            #[cfg(feature = "memory-graph")]
+            knowledge_graph: None,
+            #[cfg(feature = "memory-graph")]
+            graph_config: None,
         });
 
         process_channel_message(
@@ -5823,6 +5983,10 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
+            #[cfg(feature = "memory-graph")]
+            knowledge_graph: None,
+            #[cfg(feature = "memory-graph")]
+            graph_config: None,
         });
 
         process_channel_message(
@@ -5908,6 +6072,10 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
+            #[cfg(feature = "memory-graph")]
+            knowledge_graph: None,
+            #[cfg(feature = "memory-graph")]
+            graph_config: None,
         });
 
         process_channel_message(
@@ -6457,6 +6625,10 @@ This is an example JSON object for profile settings."#;
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
+            #[cfg(feature = "memory-graph")]
+            knowledge_graph: None,
+            #[cfg(feature = "memory-graph")]
+            graph_config: None,
         });
 
         // Simulate a photo attachment message with [IMAGE:] marker.
@@ -6523,6 +6695,10 @@ This is an example JSON object for profile settings."#;
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
+            #[cfg(feature = "memory-graph")]
+            knowledge_graph: None,
+            #[cfg(feature = "memory-graph")]
+            graph_config: None,
         });
 
         process_channel_message(

@@ -231,6 +231,68 @@ pub fn format_graph_context(connections: &[GraphConnection]) -> String {
     context
 }
 
+/// Build knowledge graph recall context for a user message.
+///
+/// Pipeline:
+/// 1. Extract entity names from user message via LLM
+/// 2. Search the graph for matching entities (FTS)
+/// 3. Fetch neighbor connections for found entities
+/// 4. Format as `[Knowledge graph]` context block
+///
+/// Returns empty string if graph has no relevant info or extraction fails.
+pub async fn build_recall_context(
+    graph: &KnowledgeGraph,
+    provider: &dyn Provider,
+    extraction_model: &str,
+    user_message: &str,
+    max_entities: usize,
+    max_hops: usize,
+) -> String {
+    // Step 1: LLM entity extraction
+    let entities =
+        match extract_recall_entities(provider, extraction_model, user_message, max_entities).await
+        {
+            Ok(e) if !e.is_empty() => e,
+            Ok(_) => return String::new(),
+            Err(e) => {
+                tracing::debug!("Graph recall entity extraction failed: {e}");
+                return String::new();
+            }
+        };
+
+    // Step 2: Resolve entity names to IDs via FTS search
+    let mut entity_ids = Vec::new();
+    for name in &entities {
+        match graph.search_entities(name, 3).await {
+            Ok(found) => {
+                for entity in found {
+                    entity_ids.push(entity.id);
+                }
+            }
+            Err(e) => tracing::debug!("Graph entity search failed for '{name}': {e}"),
+        }
+    }
+
+    if entity_ids.is_empty() {
+        return String::new();
+    }
+
+    // Deduplicate
+    entity_ids.sort_unstable();
+    entity_ids.dedup();
+
+    // Step 3: Get neighbor connections
+    let limit_per_entity = (max_hops * 10).max(10);
+    match graph.neighbors_batch(&entity_ids, limit_per_entity).await {
+        Ok(connections) if !connections.is_empty() => format_graph_context(&connections),
+        Ok(_) => String::new(),
+        Err(e) => {
+            tracing::debug!("Graph neighbor lookup failed: {e}");
+            String::new()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

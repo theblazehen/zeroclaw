@@ -27,7 +27,9 @@ pub use backend::{
 #[cfg(feature = "memory-graph")]
 pub use graph::KnowledgeGraph;
 #[cfg(feature = "memory-graph")]
-pub use graph_extract::{extract_and_store, extract_recall_entities, format_graph_context};
+pub use graph_extract::{
+    build_recall_context, extract_and_store, extract_recall_entities, format_graph_context,
+};
 pub use lucid::LucidMemory;
 pub use markdown::MarkdownMemory;
 pub use none::NoneMemory;

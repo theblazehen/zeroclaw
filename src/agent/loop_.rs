@@ -1,5 +1,7 @@
 use crate::approval::{ApprovalManager, ApprovalRequest, ApprovalResponse};
 use crate::config::Config;
+#[cfg(feature = "memory-graph")]
+use crate::memory::graph::KnowledgeGraph;
 use crate::memory::{self, Memory, MemoryCategory};
 use crate::multimodal;
 use crate::observability::{self, runtime_trace, Observer, ObserverEvent};
@@ -2749,6 +2751,27 @@ pub async fn run(
     )?);
     tracing::info!(backend = mem.name(), "Memory initialized");
 
+    // ── Knowledge graph (agent loop hooks) ─────────────────────────
+    #[cfg(feature = "memory-graph")]
+    let knowledge_graph: Option<Arc<KnowledgeGraph>> = config
+        .memory
+        .graph
+        .as_ref()
+        .filter(|g| g.enabled)
+        .and_then(|_| {
+            let db_path = config.workspace_dir.join("memory").join("brain.db");
+            match KnowledgeGraph::new(&db_path) {
+                Ok(kg) => {
+                    tracing::info!("🕸️ Knowledge graph initialized for agent loop");
+                    Some(Arc::new(kg))
+                }
+                Err(e) => {
+                    tracing::error!("Failed to initialize knowledge graph for agent loop: {e}");
+                    None
+                }
+            }
+        });
+
     // ── Peripherals (merge peripheral tools into registry) ─
     if !peripheral_overrides.is_empty() {
         tracing::info!(
@@ -2808,7 +2831,7 @@ pub async fn run(
         reasoning_enabled: config.runtime.reasoning_enabled,
     };
 
-    let provider: Box<dyn Provider> = providers::create_routed_provider_with_options(
+    let provider: Arc<dyn Provider> = Arc::from(providers::create_routed_provider_with_options(
         provider_name,
         config.api_key.as_deref(),
         config.api_url.as_deref(),
@@ -2816,12 +2839,16 @@ pub async fn run(
         &config.model_routes,
         model_name,
         &provider_runtime_options,
-    )?;
+    )?);
 
     observer.record_event(&ObserverEvent::AgentStart {
         provider: provider_name.to_string(),
         model: model_name.to_string(),
     });
+
+    // Pre-bind graph config for recall/extraction hooks
+    #[cfg(feature = "memory-graph")]
+    let graph_cfg = config.memory.graph.as_ref().filter(|g| g.enabled).cloned();
 
     // ── Hardware RAG (datasheet retrieval when peripherals + datasheet_dir) ──
     let hardware_rag: Option<crate::rag::HardwareRag> = config
@@ -2997,15 +3024,35 @@ pub async fn run(
                 .await;
         }
 
-        // Inject memory + hardware RAG context into user message
+        // Inject memory + graph + hardware RAG context into user message
         let mem_context =
             build_context(mem.as_ref(), &msg, config.memory.min_relevance_score).await;
+
+        // Knowledge graph recall
+        #[cfg(feature = "memory-graph")]
+        let graph_context =
+            if let (Some(ref graph), Some(ref gcfg)) = (&knowledge_graph, &graph_cfg) {
+                crate::memory::graph_extract::build_recall_context(
+                    graph.as_ref(),
+                    provider.as_ref(),
+                    &gcfg.extraction_model,
+                    &msg,
+                    gcfg.max_recall_entities,
+                    gcfg.max_recall_hops,
+                )
+                .await
+            } else {
+                String::new()
+            };
+        #[cfg(not(feature = "memory-graph"))]
+        let graph_context = String::new();
+
         let rag_limit = if config.agent.compact_context { 2 } else { 5 };
         let hw_context = hardware_rag
             .as_ref()
             .map(|r| build_hardware_context(r, &msg, &board_names, rag_limit))
             .unwrap_or_default();
-        let context = format!("{mem_context}{hw_context}");
+        let context = format!("{graph_context}{mem_context}{hw_context}");
         let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
         let enriched = if context.is_empty() {
             format!("[{now}] {msg}")
@@ -3039,6 +3086,33 @@ pub async fn run(
         .await?;
         final_output = response.clone();
         println!("{response}");
+
+        // Post-turn graph extraction (single message mode)
+        #[cfg(feature = "memory-graph")]
+        {
+            if let (Some(ref graph), Some(ref gcfg)) = (&knowledge_graph, &graph_cfg) {
+                if gcfg.extraction_mode == "async" {
+                    let graph = Arc::clone(graph);
+                    let provider = Arc::clone(&provider);
+                    let model = gcfg.extraction_model.clone();
+                    let conversation =
+                        vec![format!("User: {msg}"), format!("Assistant: {response}")];
+                    tokio::spawn(async move {
+                        if let Err(e) = crate::memory::graph_extract::extract_and_store(
+                            &graph,
+                            provider.as_ref(),
+                            &model,
+                            &conversation,
+                        )
+                        .await
+                        {
+                            tracing::debug!("Graph post-turn extraction failed: {e}");
+                        }
+                    });
+                }
+            }
+        }
+
         observer.record_event(&ObserverEvent::TurnComplete);
     } else {
         println!("🦀 ZeroClaw Interactive Mode");
@@ -3122,15 +3196,35 @@ pub async fn run(
                     .await;
             }
 
-            // Inject memory + hardware RAG context into user message
+            // Inject memory + graph + hardware RAG context into user message
             let mem_context =
                 build_context(mem.as_ref(), &user_input, config.memory.min_relevance_score).await;
+
+            // Knowledge graph recall
+            #[cfg(feature = "memory-graph")]
+            let graph_context =
+                if let (Some(ref graph), Some(ref gcfg)) = (&knowledge_graph, &graph_cfg) {
+                    crate::memory::graph_extract::build_recall_context(
+                        graph.as_ref(),
+                        provider.as_ref(),
+                        &gcfg.extraction_model,
+                        &user_input,
+                        gcfg.max_recall_entities,
+                        gcfg.max_recall_hops,
+                    )
+                    .await
+                } else {
+                    String::new()
+                };
+            #[cfg(not(feature = "memory-graph"))]
+            let graph_context = String::new();
+
             let rag_limit = if config.agent.compact_context { 2 } else { 5 };
             let hw_context = hardware_rag
                 .as_ref()
                 .map(|r| build_hardware_context(r, &user_input, &board_names, rag_limit))
                 .unwrap_or_default();
-            let context = format!("{mem_context}{hw_context}");
+            let context = format!("{graph_context}{mem_context}{hw_context}");
             let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
             let enriched = if context.is_empty() {
                 format!("[{now}] {user_input}")
@@ -3175,6 +3269,35 @@ pub async fn run(
             {
                 eprintln!("\nError sending CLI response: {e}\n");
             }
+
+            // Post-turn graph extraction (interactive mode)
+            #[cfg(feature = "memory-graph")]
+            {
+                if let (Some(ref graph), Some(ref gcfg)) = (&knowledge_graph, &graph_cfg) {
+                    if gcfg.extraction_mode == "async" {
+                        let graph = Arc::clone(graph);
+                        let provider = Arc::clone(&provider);
+                        let model = gcfg.extraction_model.clone();
+                        let conversation = vec![
+                            format!("User: {user_input}"),
+                            format!("Assistant: {response}"),
+                        ];
+                        tokio::spawn(async move {
+                            if let Err(e) = crate::memory::graph_extract::extract_and_store(
+                                &graph,
+                                provider.as_ref(),
+                                &model,
+                                &conversation,
+                            )
+                            .await
+                            {
+                                tracing::debug!("Graph post-turn extraction failed: {e}");
+                            }
+                        });
+                    }
+                }
+            }
+
             observer.record_event(&ObserverEvent::TurnComplete);
 
             // Auto-compaction before hard trimming to preserve long-context signal.
@@ -3226,6 +3349,28 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
         config.api_key.as_deref(),
     )?);
 
+    // Knowledge graph for process_message
+    #[cfg(feature = "memory-graph")]
+    let knowledge_graph: Option<Arc<KnowledgeGraph>> = config
+        .memory
+        .graph
+        .as_ref()
+        .filter(|g| g.enabled)
+        .and_then(|_| {
+            let db_path = config.workspace_dir.join("memory").join("brain.db");
+            match KnowledgeGraph::new(&db_path) {
+                Ok(kg) => Some(Arc::new(kg)),
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to initialize knowledge graph for process_message: {e}"
+                    );
+                    None
+                }
+            }
+        });
+    #[cfg(feature = "memory-graph")]
+    let graph_cfg = config.memory.graph.as_ref().filter(|g| g.enabled).cloned();
+
     let (composio_key, composio_entity_id) = if config.composio.enabled {
         (
             config.composio.api_key.as_deref(),
@@ -3265,7 +3410,7 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
         secrets_encrypt: config.secrets.encrypt,
         reasoning_enabled: config.runtime.reasoning_enabled,
     };
-    let provider: Box<dyn Provider> = providers::create_routed_provider_with_options(
+    let provider: Arc<dyn Provider> = Arc::from(providers::create_routed_provider_with_options(
         provider_name,
         config.api_key.as_deref(),
         config.api_url.as_deref(),
@@ -3273,7 +3418,7 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
         &config.model_routes,
         &model_name,
         &provider_runtime_options,
-    )?;
+    )?);
 
     let hardware_rag: Option<crate::rag::HardwareRag> = config
         .peripherals
@@ -3359,12 +3504,31 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
     }
 
     let mem_context = build_context(mem.as_ref(), message, config.memory.min_relevance_score).await;
+
+    // Knowledge graph recall
+    #[cfg(feature = "memory-graph")]
+    let graph_context = if let (Some(ref graph), Some(ref gcfg)) = (&knowledge_graph, &graph_cfg) {
+        crate::memory::graph_extract::build_recall_context(
+            graph.as_ref(),
+            provider.as_ref(),
+            &gcfg.extraction_model,
+            message,
+            gcfg.max_recall_entities,
+            gcfg.max_recall_hops,
+        )
+        .await
+    } else {
+        String::new()
+    };
+    #[cfg(not(feature = "memory-graph"))]
+    let graph_context = String::new();
+
     let rag_limit = if config.agent.compact_context { 2 } else { 5 };
     let hw_context = hardware_rag
         .as_ref()
         .map(|r| build_hardware_context(r, message, &board_names, rag_limit))
         .unwrap_or_default();
-    let context = format!("{mem_context}{hw_context}");
+    let context = format!("{graph_context}{mem_context}{hw_context}");
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
     let enriched = if context.is_empty() {
         format!("[{now}] {message}")
@@ -3377,7 +3541,7 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
         ChatMessage::user(&enriched),
     ];
 
-    agent_turn(
+    let result = agent_turn(
         provider.as_ref(),
         &mut history,
         &tools_registry,
@@ -3389,7 +3553,41 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
         &config.multimodal,
         config.agent.max_tool_iterations,
     )
-    .await
+    .await;
+
+    // Post-turn graph extraction (process_message)
+    #[cfg(feature = "memory-graph")]
+    {
+        if let (Ok(ref response), Some(ref graph), Some(ref gcfg)) =
+            (&result, &knowledge_graph, &graph_cfg)
+        {
+            if gcfg.extraction_mode == "async" {
+                let graph = Arc::clone(graph);
+                let provider = Arc::clone(&provider);
+                let model = gcfg.extraction_model.clone();
+                let msg_owned = message.to_string();
+                let resp_owned = response.clone();
+                tokio::spawn(async move {
+                    let conversation = vec![
+                        format!("User: {msg_owned}"),
+                        format!("Assistant: {resp_owned}"),
+                    ];
+                    if let Err(e) = crate::memory::graph_extract::extract_and_store(
+                        &graph,
+                        provider.as_ref(),
+                        &model,
+                        &conversation,
+                    )
+                    .await
+                    {
+                        tracing::debug!("Graph post-turn extraction failed: {e}");
+                    }
+                });
+            }
+        }
+    }
+
+    result
 }
 
 #[cfg(test)]
