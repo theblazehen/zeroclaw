@@ -58,8 +58,8 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # Enable whatsapp-web feature at build time
+          # Enable optional features at build time
           build-args: |
-            ZEROCLAW_FEATURES=whatsapp-web
+            ZEROCLAW_FEATURES=whatsapp-web,browser-native
           cache-from: type=gha
           cache-to: type=gha,mode=max
