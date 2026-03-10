@@ -96,9 +96,33 @@ impl GitOperationsTool {
             if line.starts_with("# branch.head ") {
                 branch = line.trim_start_matches("# branch.head ").to_string();
             } else if let Some(rest) = line.strip_prefix("1 ") {
-                // Ordinary changed entry
-                let mut parts = rest.splitn(3, ' ');
-                if let (Some(staging), Some(path)) = (parts.next(), parts.next()) {
+                // Ordinary changed entry: porcelain v2 format is
+                //   1 XY sub mH mI mW hH hI path
+                // The path is the 8th field (index 7) after the "1 " prefix.
+                let fields: Vec<&str> = rest.splitn(8, ' ').collect();
+                if fields.len() >= 8 {
+                    let staging = fields[0]; // XY pair
+                    let path = fields[7]; // actual file path
+                    if !staging.is_empty() {
+                        let status_char = staging.chars().next().unwrap_or(' ');
+                        if status_char != '.' && status_char != ' ' {
+                            staged.push(json!({"path": path, "status": status_char}));
+                        }
+                        let status_char = staging.chars().nth(1).unwrap_or(' ');
+                        if status_char != '.' && status_char != ' ' {
+                            unstaged.push(json!({"path": path, "status": status_char}));
+                        }
+                    }
+                }
+            } else if let Some(rest) = line.strip_prefix("2 ") {
+                // Rename/copy entry: porcelain v2 format is
+                //   2 XY sub mH mI mW hH hI Xscore path\torigPath
+                // The path (new name) is in the 9th field, tab-separated from origPath.
+                let fields: Vec<&str> = rest.splitn(9, ' ').collect();
+                if fields.len() >= 9 {
+                    let staging = fields[0]; // XY pair
+                    let path_field = fields[8]; // "newPath\toldPath"
+                    let path = path_field.split('\t').next().unwrap_or(path_field);
                     if !staging.is_empty() {
                         let status_char = staging.chars().next().unwrap_or(' ');
                         if status_char != '.' && status_char != ' ' {
