@@ -5978,6 +5978,11 @@ fn build_channel_by_id(
                 Arc::new(move || cfg_arc.read().channel_external_peers("telegram", &alias))
             };
             let workspace_dir = one_shot_channel_workspace_dir(&config, "telegram", &alias);
+            let voice_peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
+                let cfg_arc = config_arc.clone();
+                let alias = alias.clone();
+                Arc::new(move || cfg_arc.read().channel_voice_peers("telegram", &alias))
+            };
             Ok(Arc::new(
                 TelegramChannel::new(
                     tg.bot_token.clone(),
@@ -5985,13 +5990,13 @@ fn build_channel_by_id(
                     peer_resolver,
                     tg.mention_only,
                 )
+                .with_voice_peer_resolver(voice_peer_resolver)
                 .with_persistence(config_arc.clone())
                 .with_api_base(tg.api_base_url.clone())
                 .with_ack_reactions(ack)
                 .with_streaming(tg.stream_mode, tg.draft_update_interval_ms)
                 .with_transcription(config.transcription.clone())
                 .with_tts(&config)
-                .with_voice_peer_prefs(&config, "telegram", alias)
                 .with_workspace_dir(workspace_dir)
                 .with_approval_timeout_secs(tg.approval_timeout_secs),
             ))
@@ -6984,6 +6989,11 @@ fn collect_configured_channels(
             let alias = alias.clone();
             Arc::new(move || cfg_arc.read().channel_external_peers("telegram", &alias))
         };
+        let voice_peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
+            let cfg_arc = config_arc.clone();
+            let alias = alias.clone();
+            Arc::new(move || cfg_arc.read().channel_voice_peers("telegram", &alias))
+        };
         channels.push(ConfiguredChannel {
             display_name: "Telegram",
             alias: Some(alias.clone()),
@@ -6995,13 +7005,13 @@ fn collect_configured_channels(
                         peer_resolver,
                         tg.mention_only,
                     )
+                    .with_voice_peer_resolver(voice_peer_resolver)
                     .with_persistence(config_arc.clone())
                     .with_api_base(tg.api_base_url.clone())
                     .with_ack_reactions(ack)
                     .with_streaming(tg.stream_mode, tg.draft_update_interval_ms)
                     .with_transcription(config.transcription.clone())
                     .with_tts(&config)
-                    .with_voice_peer_prefs(&config, "telegram", alias)
                     .with_workspace_dir(config.channel_workspace_dir(&format!("telegram.{alias}")))
                     .with_proxy_url(tg.proxy_url.clone())
                     .with_tool_command_specs(tool_specs.to_vec())
