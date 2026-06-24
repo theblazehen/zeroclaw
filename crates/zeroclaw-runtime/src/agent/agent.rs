@@ -238,6 +238,7 @@ pub struct StreamedTurnError {
 #[derive(Clone, Default)]
 pub struct AgentChannelHandles {
     pub ask_user: Option<tools::PerToolChannelHandle>,
+    pub channel_room: Option<tools::PerToolChannelHandle>,
     pub reaction: tools::PerToolChannelHandle,
     pub poll: Option<tools::PerToolChannelHandle>,
     pub escalate: Option<tools::PerToolChannelHandle>,
@@ -248,6 +249,7 @@ impl AgentChannelHandles {
     fn populated_handles(&self) -> Vec<Option<&tools::PerToolChannelHandle>> {
         vec![
             self.ask_user.as_ref(),
+            self.channel_room.as_ref(),
             Some(&self.reaction),
             self.poll.as_ref(),
             self.escalate.as_ref(),
@@ -1210,6 +1212,7 @@ impl Agent {
         let mut tools = all_tools_result.tools;
         let delegate_handle = all_tools_result.delegate_handle;
         let ask_user_handle = all_tools_result.ask_user_handle;
+        let channel_room_handle = all_tools_result.channel_room_handle;
         let reaction_handle = all_tools_result.reaction_handle;
         let poll_handle = all_tools_result.poll_handle;
         let escalate_handle = all_tools_result.escalate_handle;
@@ -1513,6 +1516,7 @@ impl Agent {
         // the ACP server) can register back-channels after construction.
         agent.channel_handles = AgentChannelHandles {
             ask_user: ask_user_handle,
+            channel_room: channel_room_handle,
             reaction: reaction_handle,
             poll: poll_handle,
             escalate: escalate_handle,

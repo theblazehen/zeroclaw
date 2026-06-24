@@ -6758,6 +6758,24 @@ pub(crate) fn composite_channel_key(name: &str, alias: Option<&str>) -> String {
     }
 }
 
+fn configured_channel_map(configured: &[ConfiguredChannel]) -> HashMap<String, Arc<dyn Channel>> {
+    let mut map: HashMap<String, Arc<dyn Channel>> = HashMap::new();
+    let mut name_counts: HashMap<&str, usize> = HashMap::new();
+    for cc in configured {
+        *name_counts.entry(cc.channel.name()).or_insert(0) += 1;
+    }
+    for cc in configured {
+        let name = cc.channel.name();
+        let composite = composite_channel_key(name, cc.alias.as_deref());
+        map.insert(composite, Arc::clone(&cc.channel));
+        if name_counts.get(name).copied().unwrap_or(0) == 1 {
+            map.entry(name.to_string())
+                .or_insert_with(|| Arc::clone(&cc.channel));
+        }
+    }
+    map
+}
+
 /// Look up the live channel handle that should send a reply to `msg`.
 ///
 /// Resolution order:
@@ -6918,13 +6936,8 @@ pub fn build_channel_map(
     config: &Config,
 ) -> HashMap<String, Arc<dyn zeroclaw_api::channel::Channel>> {
     let config_arc = Arc::new(RwLock::new(config.clone()));
-    collect_configured_channels(&config_arc, "", &[])
-        .into_iter()
-        .map(|ch| {
-            let key = composite_channel_key(ch.channel.name(), ch.alias.as_deref());
-            (key, ch.channel)
-        })
-        .collect()
+    let configured = collect_configured_channels(&config_arc, "", &[]);
+    configured_channel_map(&configured)
 }
 
 /// Build configured channels and register them into late-bound tool handles.
@@ -6937,6 +6950,7 @@ pub fn build_channel_map(
 pub fn register_channels_for_tools(
     config: &Config,
     ask_user_handle: &Option<tools::PerToolChannelHandle>,
+    channel_room_handle: &Option<tools::PerToolChannelHandle>,
     reaction_handle: &Option<tools::PerToolChannelHandle>,
     poll_handle: &Option<tools::PerToolChannelHandle>,
     escalate_handle: &Option<tools::PerToolChannelHandle>,
@@ -6946,19 +6960,20 @@ pub fn register_channels_for_tools(
 
     let handles = [
         ask_user_handle.as_ref(),
+        channel_room_handle.as_ref(),
         reaction_handle.as_ref(),
         poll_handle.as_ref(),
         escalate_handle.as_ref(),
     ];
 
-    let mut names = Vec::new();
-    for ch in &configured {
-        let key = composite_channel_key(ch.channel.name(), ch.alias.as_deref());
+    let map = configured_channel_map(&configured);
+    for (key, channel) in &map {
         for handle in handles.iter().flatten() {
-            handle.write().insert(key.clone(), Arc::clone(&ch.channel));
+            handle.write().insert(key.clone(), Arc::clone(channel));
         }
-        names.push(key);
     }
+    let mut names: Vec<String> = map.keys().cloned().collect();
+    names.sort();
     names
 }
 
@@ -8924,6 +8939,7 @@ pub async fn start_channels(
         }
         let reaction_handle_ch = all_tools_result_ch.reaction_handle;
         let ask_user_handle_ch = all_tools_result_ch.ask_user_handle;
+        let channel_room_handle_ch = all_tools_result_ch.channel_room_handle;
         let poll_handle_ch = all_tools_result_ch.poll_handle;
         let escalate_handle_ch = all_tools_result_ch.escalate_handle;
 
@@ -9178,6 +9194,10 @@ pub async fn start_channels(
             "pushover",
             "Send a Pushover notification to your device. Requires PUSHOVER_TOKEN and PUSHOVER_USER_KEY in .env file.",
         ));
+        tool_descs.push((
+            "channel_room",
+            "Create channel rooms and invite users through active channels. Use with Matrix channel keys such as matrix.default.",
+        ));
         if !config.agents.is_empty() {
             tool_descs.push((
                 "delegate",
@@ -9384,23 +9404,7 @@ pub async fn start_channels(
             drop(tx);
 
             // Composite-key registry (see `composite_channel_key`).
-            let cbn = Arc::new({
-                let mut map: HashMap<String, Arc<dyn Channel>> = HashMap::new();
-                let mut name_counts: HashMap<&str, usize> = HashMap::new();
-                for cc in &configured_channels {
-                    *name_counts.entry(cc.channel.name()).or_insert(0) += 1;
-                }
-                for cc in &configured_channels {
-                    let name = cc.channel.name();
-                    let composite = composite_channel_key(name, cc.alias.as_deref());
-                    map.insert(composite, Arc::clone(&cc.channel));
-                    if name_counts.get(name).copied().unwrap_or(0) == 1 {
-                        map.entry(name.to_string())
-                            .or_insert_with(|| Arc::clone(&cc.channel));
-                    }
-                }
-                map
-            });
+            let cbn = Arc::new(configured_channel_map(&configured_channels));
             *CRON_CHANNEL_REGISTRY
                 .write()
                 .unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&cbn));
@@ -9419,7 +9423,7 @@ pub async fn start_channels(
                 .expect("channels_by_name initialized on first iteration"),
         );
 
-        // Wire this agent's reaction / ask_user / escalate tool handles
+        // Wire this agent's reaction / ask_user / channel room / escalate tool handles
         // into the shared `channels_by_name` map.
         {
             let mut map = reaction_handle_ch.write();
@@ -9428,6 +9432,12 @@ pub async fn start_channels(
             }
         }
         if let Some(ref handle) = ask_user_handle_ch {
+            let mut map = handle.write();
+            for (name, ch) in channels_by_name.as_ref() {
+                map.insert(name.clone(), Arc::clone(ch));
+            }
+        }
+        if let Some(ref handle) = channel_room_handle_ch {
             let mut map = handle.write();
             for (name, ch) in channels_by_name.as_ref() {
                 map.insert(name.clone(), Arc::clone(ch));
@@ -10207,6 +10217,48 @@ temperature = 0.3
         // Empty-string alias collapses to bare name so we never produce a
         // `discord.` key that no message would ever match.
         assert_eq!(composite_channel_key("discord", Some("")), "discord");
+    }
+
+    #[test]
+    fn configured_channel_map_adds_bare_key_for_singleton_type() {
+        let matrix = mock_channel("matrix");
+        let configured = vec![ConfiguredChannel {
+            display_name: "Matrix",
+            alias: Some("default".to_string()),
+            channel: Arc::clone(&matrix),
+        }];
+
+        let map = configured_channel_map(&configured);
+
+        assert!(Arc::ptr_eq(map.get("matrix.default").unwrap(), &matrix));
+        assert!(Arc::ptr_eq(map.get("matrix").unwrap(), &matrix));
+    }
+
+    #[test]
+    fn configured_channel_map_keeps_multi_aliases_composite_only() {
+        let clamps = mock_channel("discord");
+        let glados = mock_channel("discord");
+        let configured = vec![
+            ConfiguredChannel {
+                display_name: "Discord",
+                alias: Some("clamps".to_string()),
+                channel: Arc::clone(&clamps),
+            },
+            ConfiguredChannel {
+                display_name: "Discord",
+                alias: Some("glados".to_string()),
+                channel: Arc::clone(&glados),
+            },
+        ];
+
+        let map = configured_channel_map(&configured);
+
+        assert!(Arc::ptr_eq(map.get("discord.clamps").unwrap(), &clamps));
+        assert!(Arc::ptr_eq(map.get("discord.glados").unwrap(), &glados));
+        assert!(
+            !map.contains_key("discord"),
+            "bare key would be ambiguous for multiple aliases"
+        );
     }
 
     #[test]
