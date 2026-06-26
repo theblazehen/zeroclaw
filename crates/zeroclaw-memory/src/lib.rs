@@ -31,6 +31,7 @@ pub mod conflict;
 pub mod consolidation;
 pub mod decay;
 pub mod embeddings;
+pub mod hindsight;
 pub mod hygiene;
 pub mod importance;
 pub mod knowledge_graph;
@@ -59,6 +60,7 @@ pub use backend::{
     MemoryBackendKind, MemoryBackendProfile, classify_memory_backend, default_memory_backend_key,
     memory_backend_profile, selectable_memory_backends,
 };
+pub use hindsight::HindsightMemory;
 pub use lucid::LucidMemory;
 pub use markdown::MarkdownMemory;
 pub use none::NoneMemory;
@@ -83,7 +85,8 @@ use anyhow::Context;
 use std::path::Path;
 use std::sync::Arc;
 use zeroclaw_config::schema::{
-    ActiveStorage, EmbeddingRouteConfig, MemoryConfig, PostgresStorageConfig,
+    ActiveStorage, EmbeddingRouteConfig, HindsightStorageConfig, MemoryConfig,
+    PostgresStorageConfig,
 };
 
 #[cfg(feature = "memory-postgres")]
@@ -113,6 +116,34 @@ fn build_postgres_memory(_storage: &PostgresStorageConfig) -> anyhow::Result<Box
     )
 }
 
+fn build_hindsight_memory(storage: &HindsightStorageConfig) -> anyhow::Result<Box<dyn Memory>> {
+    let url = storage
+        .url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| std::env::var("HINDSIGHT_API_URL").ok())
+        .context("Hindsight memory backend requires `url` in [storage.hindsight.<alias>] or HINDSIGHT_API_URL")?;
+    let api_key = storage
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| std::env::var("HINDSIGHT_API_KEY").ok())
+        .context("Hindsight memory backend requires `api_key` in [storage.hindsight.<alias>] or HINDSIGHT_API_KEY")?;
+
+    Ok(Box::new(HindsightMemory::new(
+        "hindsight",
+        &url,
+        &api_key,
+        &storage.tenant,
+        &storage.bank_id,
+        storage.synchronous_retain,
+    )?))
+}
+
 fn create_memory_with_builders<F>(
     backend_name: &str,
     workspace_dir: &Path,
@@ -128,14 +159,14 @@ where
             let local = sqlite_builder()?;
             Ok(Box::new(LucidMemory::new("lucid", workspace_dir, local)))
         }
-        MemoryBackendKind::Postgres => {
-            // Postgres requires a typed `[storage.postgres.<alias>]` config, which this
+        MemoryBackendKind::Postgres | MemoryBackendKind::Hindsight => {
+            // Remote backends require typed `[storage.<backend>.<alias>]` config, which this
             // builder-only entry point does not receive. All supported call paths go
-            // through `create_memory_with_storage_and_routes`, which handles postgres via
-            // an early return. Fail loudly if a caller ever reaches this arm, rather than
+            // through `create_memory_with_storage_and_routes`, which handles them via
+            // early returns. Fail loudly if a caller ever reaches this arm, rather than
             // pretending to work with default configs that can never connect.
             anyhow::bail!(
-                "postgres backend requires storage config; \
+                "{backend_name} backend requires storage config; \
                  call create_memory_with_storage_and_routes instead of create_memory_with_builders"
             )
         }
@@ -473,6 +504,17 @@ pub fn create_memory_with_storage_and_routes(
             ),
         };
         return build_postgres_memory(pg_cfg);
+    }
+
+    if matches!(backend_kind, MemoryBackendKind::Hindsight) {
+        let hindsight_cfg = match active_storage {
+            ActiveStorage::Hindsight(h) => h,
+            _ => anyhow::bail!(
+                "memory backend 'hindsight' requires a `[storage.hindsight.<alias>]` entry \
+                 referenced by `memory.backend = \"hindsight.<alias>\"`"
+            ),
+        };
+        return build_hindsight_memory(hindsight_cfg);
     }
 
     create_memory_with_builders(

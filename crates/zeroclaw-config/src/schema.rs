@@ -4135,6 +4135,12 @@ impl Config {
                 .get(alias)
                 .map(ActiveStorage::Qdrant)
                 .unwrap_or(ActiveStorage::None),
+            "hindsight" => self
+                .storage
+                .hindsight
+                .get(alias)
+                .map(ActiveStorage::Hindsight)
+                .unwrap_or(ActiveStorage::None),
             "markdown" => self
                 .storage
                 .markdown
@@ -4166,6 +4172,8 @@ pub enum ActiveStorage<'a> {
     Postgres(&'a PostgresStorageConfig),
     /// Qdrant storage instance.
     Qdrant(&'a QdrantStorageConfig),
+    /// Hindsight service storage instance.
+    Hindsight(&'a HindsightStorageConfig),
     /// Markdown directory storage instance.
     Markdown(&'a MarkdownStorageConfig),
     /// Lucid CLI sync instance.
@@ -4181,6 +4189,7 @@ impl ActiveStorage<'_> {
             ActiveStorage::Sqlite(_) => "sqlite",
             ActiveStorage::Postgres(_) => "postgres",
             ActiveStorage::Qdrant(_) => "qdrant",
+            ActiveStorage::Hindsight(_) => "hindsight",
             ActiveStorage::Markdown(_) => "markdown",
             ActiveStorage::Lucid(_) => "lucid",
         }
@@ -9656,6 +9665,10 @@ pub struct StorageConfig {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     #[nested]
     pub qdrant: HashMap<String, QdrantStorageConfig>,
+    /// Hindsight service storage instances (`[storage.hindsight.<alias>]`).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    #[nested]
+    pub hindsight: HashMap<String, HindsightStorageConfig>,
     /// Markdown storage instances (`[storage.markdown.<alias>]`).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     #[nested]
@@ -9753,6 +9766,41 @@ impl Default for QdrantStorageConfig {
     }
 }
 
+/// Hindsight remote memory service backend (`[storage.hindsight.<alias>]`).
+#[derive(Debug, Clone, Serialize, Deserialize, Configurable)]
+#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
+#[prefix = "storage_hindsight"]
+#[serde(default)]
+pub struct HindsightStorageConfig {
+    /// Hindsight API base URL, e.g. `http://hindsight.clawd.svc.cluster.local:8888`.
+    /// Falls back to `HINDSIGHT_API_URL` when unset.
+    pub url: Option<String>,
+    /// Tenant id in Hindsight route paths.
+    pub tenant: String,
+    /// Bank id where ZeroClaw memories are retained and recalled.
+    pub bank_id: String,
+    /// API key for Hindsight tenant authentication.
+    /// Falls back to `HINDSIGHT_API_KEY` when unset.
+    #[secret]
+    #[credential_class = "encrypted_secret"]
+    #[cfg_attr(feature = "schema-export", schemars(extend("x-secret" = true)))]
+    pub api_key: Option<String>,
+    /// Whether ZeroClaw `store` waits for Hindsight retain to complete.
+    pub synchronous_retain: bool,
+}
+
+impl Default for HindsightStorageConfig {
+    fn default() -> Self {
+        Self {
+            url: None,
+            tenant: default_hindsight_tenant(),
+            bank_id: default_hindsight_bank_id(),
+            api_key: None,
+            synchronous_retain: true,
+        }
+    }
+}
+
 /// Markdown directory storage (`[storage.markdown.<alias>]`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
@@ -9784,6 +9832,14 @@ fn default_storage_table() -> String {
 
 fn default_qdrant_collection() -> String {
     "zeroclaw_memories".into()
+}
+
+fn default_hindsight_tenant() -> String {
+    "default".into()
+}
+
+fn default_hindsight_bank_id() -> String {
+    "zeroclaw".into()
 }
 
 /// Search strategy for memory recall.

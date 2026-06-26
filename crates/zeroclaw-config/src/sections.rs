@@ -364,9 +364,10 @@ sections! {
         group: Storage,
         help:  "SQLite is the safe default for single-node installs (file-based, \
                 zero-config, no extra services). Pick Postgres for shared or \
-                multi-instance deployments, Qdrant for vector search, Markdown or \
-                Lucid for human-readable files. Each backend supports multiple \
-                aliased instances; agents reference them via `memory.storage_ref`.",
+                multi-instance deployments, Qdrant for vector search, Hindsight for \
+                a remote agent-memory service, Markdown or Lucid for human-readable \
+                files. Each backend supports multiple aliased instances; agents \
+                reference them via `memory.backend`.",
     },
     Memory => {
         key:   "memory",
@@ -1065,7 +1066,7 @@ mod tests {
             help.contains("default") || help.contains("safe") || help.contains("recommend"),
             "storage help must signal SQLite is the default/safe/recommended choice; got: {help}",
         );
-        for other in ["postgres", "qdrant", "markdown", "lucid"] {
+        for other in ["postgres", "qdrant", "hindsight", "markdown", "lucid"] {
             let other_pos = help.find(other).unwrap_or_else(|| {
                 panic!(
                     "storage help must still name `{other}` so operators know the alternatives \

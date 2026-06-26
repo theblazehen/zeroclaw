@@ -37,7 +37,7 @@ pub enum AccessMode {
 ///
 /// Closed set; the schema is law. The enum mirrors the storage-instance
 /// outer keys under `Config.storage.<kind>.<alias>`: `sqlite`, `postgres`,
-/// `qdrant`, `markdown`, `lucid`, plus `none` for the no-storage case.
+/// `qdrant`, `hindsight`, `markdown`, `lucid`, plus `none` for the no-storage case.
 ///
 /// An agent's backend is locked at agent creation and immutable on
 /// subsequent loads. `Config::validate()` enforces immutability against
@@ -58,6 +58,8 @@ pub enum MemoryBackendKind {
     Postgres,
     /// Qdrant vector store (`crates/zeroclaw-memory/src/qdrant.rs`).
     Qdrant,
+    /// Hindsight remote memory service (`crates/zeroclaw-memory/src/hindsight.rs`).
+    Hindsight,
     /// Markdown files in the agent's workspace
     /// (`crates/zeroclaw-memory/src/markdown.rs`).
     Markdown,
@@ -301,6 +303,7 @@ external_peers = ["@user_1", "@user_2"]
             (MemoryBackendKind::Sqlite, "\"sqlite\""),
             (MemoryBackendKind::Postgres, "\"postgres\""),
             (MemoryBackendKind::Qdrant, "\"qdrant\""),
+            (MemoryBackendKind::Hindsight, "\"hindsight\""),
             (MemoryBackendKind::Markdown, "\"markdown\""),
             (MemoryBackendKind::Lucid, "\"lucid\""),
         ];
