@@ -61,11 +61,6 @@ struct ListResponse {
 }
 
 #[derive(Debug, Deserialize)]
-struct StatsResponse {
-    total_nodes: usize,
-}
-
-#[derive(Debug, Deserialize)]
 struct HindsightResult {
     id: String,
     #[serde(default)]
@@ -282,22 +277,23 @@ impl HindsightMemory {
     async fn send_count(&self) -> anyhow::Result<usize> {
         let response = self
             .client
-            .get(format!("{}/stats", self.bank_url()))
+            .get(format!("{}/memories/list", self.bank_url()))
             .bearer_auth(&self.api_key)
+            .query(&[("limit", "1")])
             .send()
             .await
-            .context("failed to call Hindsight stats API")?;
+            .context("failed to call Hindsight list API")?;
         let status = response.status();
         let body = response
             .text()
             .await
-            .context("failed to read Hindsight stats response")?;
+            .context("failed to read Hindsight list response")?;
         if !status.is_success() {
-            anyhow::bail!("Hindsight stats failed with HTTP {status}: {body}");
+            anyhow::bail!("Hindsight list failed with HTTP {status}: {body}");
         }
-        let parsed: StatsResponse = serde_json::from_str(&body)
-            .with_context(|| format!("failed to parse Hindsight stats response: {body}"))?;
-        Ok(parsed.total_nodes)
+        let parsed: ListResponse = serde_json::from_str(&body)
+            .with_context(|| format!("failed to parse Hindsight list response: {body}"))?;
+        Ok(parsed.total)
     }
 
     async fn ensure_bank(&self) -> anyhow::Result<()> {
