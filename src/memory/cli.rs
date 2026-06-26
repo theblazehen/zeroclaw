@@ -113,6 +113,15 @@ fn create_cli_memory(config: &Config) -> Result<Box<dyn Memory>> {
         MemoryBackendKind::None => {
             bail!("Memory backend is 'none' (disabled). No entries to manage.");
         }
+        MemoryBackendKind::Postgres | MemoryBackendKind::Qdrant | MemoryBackendKind::Hindsight => {
+            create_memory_with_storage_and_routes(
+                &config.memory,
+                &config.embedding_routes,
+                config.resolve_active_storage(),
+                &config.data_dir,
+                None,
+            )
+        }
         _ => create_memory_for_migration(&backend, &config.data_dir),
     }
 }
