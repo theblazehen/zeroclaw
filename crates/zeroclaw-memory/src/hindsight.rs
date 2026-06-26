@@ -461,14 +461,20 @@ impl Memory for HindsightMemory {
         let namespace = namespace.unwrap_or("default");
         let memory_type = Self::category_to_hindsight(&category);
         let document_id = format!("zeroclaw-{key}");
-        let metadata = json!({
+        let mut metadata = json!({
             "key": key,
             "category": category.to_string(),
             "namespace": namespace,
-            "session_id": session_id,
-            "importance": importance,
-            "agent_id": agent_id,
         });
+        if let Some(session_id) = session_id {
+            metadata["session_id"] = json!(session_id);
+        }
+        if let Some(importance) = importance {
+            metadata["importance"] = json!(importance);
+        }
+        if let Some(agent_id) = agent_id {
+            metadata["agent_id"] = json!(agent_id);
+        }
         let item = RetainItem {
             content,
             context: format!("ZeroClaw {memory_type} memory"),
