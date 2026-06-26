@@ -54,6 +54,18 @@ struct RecallResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct ListResponse {
+    #[serde(default)]
+    items: Vec<HindsightResult>,
+    total: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct StatsResponse {
+    total_nodes: usize,
+}
+
+#[derive(Debug, Deserialize)]
 struct HindsightResult {
     id: String,
     #[serde(default)]
@@ -62,6 +74,8 @@ struct HindsightResult {
     memory_type: Option<String>,
     #[serde(default)]
     mentioned_at: Option<String>,
+    #[serde(default)]
+    date: Option<String>,
     #[serde(default)]
     metadata: Value,
 }
@@ -174,6 +188,7 @@ impl HindsightMemory {
         let agent_id = Self::metadata_key(&result.metadata, "agent_id").map(ToString::to_string);
         let timestamp = result
             .mentioned_at
+            .or(result.date)
             .unwrap_or_else(|| Utc::now().to_rfc3339());
 
         MemoryEntry {
@@ -221,6 +236,68 @@ impl HindsightMemory {
             .map(Self::entry_from_result)
             .take(limit)
             .collect())
+    }
+
+    async fn send_list(
+        &self,
+        category: Option<&MemoryCategory>,
+        session_id: Option<&str>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<MemoryEntry>> {
+        let mut request = self
+            .client
+            .get(format!("{}/memories/list", self.bank_url()))
+            .bearer_auth(&self.api_key)
+            .query(&[("limit", limit.to_string())]);
+        if let Some(category) = category {
+            request = request.query(&[("type", Self::category_to_hindsight(category))]);
+        }
+        let response = request
+            .send()
+            .await
+            .context("failed to call Hindsight list API")?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .context("failed to read Hindsight list response")?;
+        if !status.is_success() {
+            anyhow::bail!("Hindsight list failed with HTTP {status}: {body}");
+        }
+        let parsed: ListResponse = serde_json::from_str(&body)
+            .with_context(|| format!("failed to parse Hindsight list response: {body}"))?;
+        let _ = parsed.total;
+        let mut entries: Vec<_> = parsed
+            .items
+            .into_iter()
+            .map(Self::entry_from_result)
+            .collect();
+        if let Some(session_id) = session_id {
+            entries.retain(|entry| entry.session_id.as_deref() == Some(session_id));
+        }
+        entries.truncate(limit);
+        Ok(entries)
+    }
+
+    async fn send_count(&self) -> anyhow::Result<usize> {
+        let response = self
+            .client
+            .get(format!("{}/stats", self.bank_url()))
+            .bearer_auth(&self.api_key)
+            .send()
+            .await
+            .context("failed to call Hindsight stats API")?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .context("failed to read Hindsight stats response")?;
+        if !status.is_success() {
+            anyhow::bail!("Hindsight stats failed with HTTP {status}: {body}");
+        }
+        let parsed: StatsResponse = serde_json::from_str(&body)
+            .with_context(|| format!("failed to parse Hindsight stats response: {body}"))?;
+        Ok(parsed.total_nodes)
     }
 
     async fn ensure_bank(&self) -> anyhow::Result<()> {
@@ -327,14 +404,7 @@ impl Memory for HindsightMemory {
         category: Option<&MemoryCategory>,
         session_id: Option<&str>,
     ) -> anyhow::Result<Vec<MemoryEntry>> {
-        let request = RecallRequest {
-            query: "",
-            budget: "low",
-            max_tokens: 4096,
-            tags: Self::tags(None, category, None, session_id, None),
-            tags_match: Some("all_strict"),
-        };
-        self.send_recall(&request, 100).await
+        self.send_list(category, session_id, 100).await
     }
 
     async fn forget(&self, _key: &str) -> anyhow::Result<bool> {
@@ -346,7 +416,7 @@ impl Memory for HindsightMemory {
     }
 
     async fn count(&self) -> anyhow::Result<usize> {
-        Ok(self.list(None, None).await?.len())
+        self.send_count().await
     }
 
     async fn health_check(&self) -> bool {
@@ -453,20 +523,12 @@ impl Memory for HindsightMemory {
     }
 
     async fn export(&self, filter: &ExportFilter) -> anyhow::Result<Vec<MemoryEntry>> {
-        let request = RecallRequest {
-            query: "",
-            budget: "low",
-            max_tokens: 8192,
-            tags: Self::tags(
-                None,
-                filter.category.as_ref(),
-                filter.namespace.as_deref(),
-                filter.session_id.as_deref(),
-                None,
-            ),
-            tags_match: Some("all_strict"),
-        };
-        let mut entries = self.send_recall(&request, 1000).await?;
+        let mut entries = self
+            .send_list(filter.category.as_ref(), filter.session_id.as_deref(), 1000)
+            .await?;
+        if let Some(namespace) = filter.namespace.as_deref() {
+            entries.retain(|entry| entry.namespace == namespace);
+        }
         entries.retain(|entry| {
             if let Some(since) = filter.since.as_deref()
                 && entry.timestamp.as_str() < since
