@@ -1707,16 +1707,17 @@ async fn run_quickstart_cli(
                 }
             }
             Action::Memory => {
-                // Schema-derived list — six variants today, more as
+                // Schema-derived list — seven variants today, more as
                 // soon as someone adds them to
                 // `zeroclaw_config::multi_agent::MemoryBackendKind`.
                 // The exhaustive `match` here keeps the variant
                 // array honest at compile time.
-                let kinds: [MemoryChoice; 6] = [
+                let kinds: [MemoryChoice; 7] = [
                     MemoryChoice::Sqlite,
                     MemoryChoice::Markdown,
                     MemoryChoice::Postgres,
                     MemoryChoice::Qdrant,
+                    MemoryChoice::Hindsight,
                     MemoryChoice::Lucid,
                     MemoryChoice::None,
                 ];
@@ -1726,6 +1727,7 @@ async fn run_quickstart_cli(
                     | MemoryChoice::Markdown
                     | MemoryChoice::Postgres
                     | MemoryChoice::Qdrant
+                    | MemoryChoice::Hindsight
                     | MemoryChoice::Lucid
                     | MemoryChoice::None => (),
                 };
