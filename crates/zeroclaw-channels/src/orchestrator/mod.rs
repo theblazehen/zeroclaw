@@ -3347,6 +3347,46 @@ fn sanitize_channel_response(response: &str, tools: &[Box<dyn Tool>]) -> String 
 const EMPTY_CHANNEL_REPLY_FALLBACK: &str =
     "I couldn't produce a visible reply for that message. Please try again.";
 
+const CHANNEL_FAILURE_NOTICE_MAX_CHARS: usize = 500;
+
+fn channel_failure_notice(prefix: &str, reason: impl AsRef<str>) -> String {
+    let safe_reason = zeroclaw_providers::sanitize_api_error(reason.as_ref());
+    let safe_reason = truncate_with_ellipsis(&safe_reason, CHANNEL_FAILURE_NOTICE_MAX_CHARS);
+    if safe_reason.trim().is_empty() {
+        format!("⚠️ {prefix}")
+    } else {
+        format!("⚠️ {prefix}: {safe_reason}")
+    }
+}
+
+async fn notify_channel_failure(
+    channel: Option<&Arc<dyn Channel>>,
+    msg: &zeroclaw_api::channel::ChannelMessage,
+    draft_message_id: Option<&str>,
+    text: impl AsRef<str>,
+) {
+    let Some(channel) = channel else {
+        return;
+    };
+    let text = text.as_ref();
+    let result = if let Some(draft_id) = draft_message_id {
+        channel
+            .finalize_draft(&msg.reply_target, draft_id, text)
+            .await
+    } else {
+        channel.send(&SendMessage::reply_to(msg, text)).await
+    };
+    if let Err(err) = result {
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                .with_attrs(::serde_json::json!({"error": format!("{}", err)})),
+            "failed to send channel failure notice"
+        );
+    }
+}
+
 /// Ensure channel outbound text is never empty so users don't see typing with no message.
 fn ensure_nonempty_channel_reply(
     delivered_response: String,
@@ -4047,7 +4087,7 @@ async fn process_channel_message_body(
 
     // ── Hook: on_message_received (modifying) ────────────
     let mut msg = if let Some(hooks) = &ctx.hooks {
-        match hooks.run_on_message_received(msg).await {
+        match hooks.run_on_message_received(msg.clone()).await {
             zeroclaw_runtime::hooks::HookResult::Cancel(reason) => {
                 ::zeroclaw_log::record!(
                     INFO,
@@ -4055,6 +4095,9 @@ async fn process_channel_message_body(
                         .with_attrs(::serde_json::json!({"reason": reason.to_string()})),
                     "incoming message dropped by hook"
                 );
+                let target_channel = find_channel_for_message(&ctx.channels_by_name, &msg).cloned();
+                let notice = channel_failure_notice("I stopped processing this message", reason);
+                notify_channel_failure(target_channel.as_ref(), &msg, None, notice).await;
                 return;
             }
             zeroclaw_runtime::hooks::HookResult::Continue(modified) => modified,
@@ -5044,11 +5087,14 @@ async fn process_channel_message_body(
                             .with_attrs(::serde_json::json!({"reason": reason.to_string()})),
                             "outgoing message suppressed by hook"
                         );
-                        if let (Some(channel), Some(draft_id)) =
-                            (target_channel.as_ref(), draft_message_id.as_deref())
-                        {
-                            let _ = channel.cancel_draft(&msg.reply_target, draft_id).await;
-                        }
+                        let notice = channel_failure_notice("I could not send the reply", reason);
+                        notify_channel_failure(
+                            target_channel.as_ref(),
+                            &msg,
+                            draft_message_id.as_deref(),
+                            notice,
+                        )
+                        .await;
                         return;
                     }
                     zeroclaw_runtime::hooks::HookResult::Continue((
@@ -5336,20 +5382,13 @@ async fn process_channel_message_body(
                         })),
                     "channel_message_error"
                 );
-                if let Some(channel) = target_channel.as_ref() {
-                    if let Some(ref draft_id) = draft_message_id {
-                        let _ = channel
-                            .finalize_draft(&msg.reply_target, draft_id, error_text)
-                            .await;
-                    } else {
-                        let _ = channel
-                            .send(
-                                &SendMessage::new(error_text, &msg.reply_target)
-                                    .in_thread(msg.thread_ts.clone()),
-                            )
-                            .await;
-                    }
-                }
+                notify_channel_failure(
+                    target_channel.as_ref(),
+                    &msg,
+                    draft_message_id.as_deref(),
+                    error_text,
+                )
+                .await;
             } else {
                 eprintln!(
                     "  ❌ LLM error after {}ms: {e}",
@@ -5408,20 +5447,14 @@ async fn process_channel_message_body(
                         ChatMessage::assistant("[Task failed — not continuing this request]"),
                     );
                 }
-                if let Some(channel) = target_channel.as_ref() {
-                    if let Some(ref draft_id) = draft_message_id {
-                        let _ = channel
-                            .finalize_draft(&msg.reply_target, draft_id, &format!("⚠️ Error: {e}"))
-                            .await;
-                    } else {
-                        let _ = channel
-                            .send(
-                                &SendMessage::new(format!("⚠️ Error: {e}"), &msg.reply_target)
-                                    .in_thread(msg.thread_ts.clone()),
-                            )
-                            .await;
-                    }
-                }
+                let notice = channel_failure_notice("Error", e.to_string());
+                notify_channel_failure(
+                    target_channel.as_ref(),
+                    &msg,
+                    draft_message_id.as_deref(),
+                    notice,
+                )
+                .await;
             }
         }
         LlmExecutionResult::Completed(Err(_)) => {
@@ -5456,22 +5489,13 @@ async fn process_channel_message_body(
                 &history_key,
                 ChatMessage::assistant("[Task timed out — not continuing this request]"),
             );
-            if let Some(channel) = target_channel.as_ref() {
-                let error_text =
-                    "⚠️ Request timed out while waiting for the model. Please try again.";
-                if let Some(ref draft_id) = draft_message_id {
-                    let _ = channel
-                        .finalize_draft(&msg.reply_target, draft_id, error_text)
-                        .await;
-                } else {
-                    let _ = channel
-                        .send(
-                            &SendMessage::new(error_text, &msg.reply_target)
-                                .in_thread(msg.thread_ts.clone()),
-                        )
-                        .await;
-                }
-            }
+            notify_channel_failure(
+                target_channel.as_ref(),
+                &msg,
+                draft_message_id.as_deref(),
+                "⚠️ Request timed out while waiting for the model. Please try again.",
+            )
+            .await;
         }
     }
 
@@ -11328,6 +11352,21 @@ api_key = "anthropic-key"
             "15551234567@s.whatsapp.net",
         );
         assert_eq!(result, "Hello");
+    }
+
+    #[test]
+    fn channel_failure_notice_sanitizes_and_truncates_reason() {
+        let long_reason = format!(
+            "provider failed: {}",
+            "x".repeat(CHANNEL_FAILURE_NOTICE_MAX_CHARS + 50)
+        );
+        let result = channel_failure_notice("Error", long_reason);
+
+        assert!(result.starts_with("⚠️ Error: "));
+        assert!(
+            result.chars().count()
+                <= "⚠️ Error: ".chars().count() + CHANNEL_FAILURE_NOTICE_MAX_CHARS + 3
+        );
     }
 
     #[test]
