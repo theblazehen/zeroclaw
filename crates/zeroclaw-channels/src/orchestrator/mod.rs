@@ -5896,21 +5896,13 @@ fn maybe_restart_managed_daemon_service() -> Result<bool> {
     Ok(false)
 }
 
-#[cfg(any(
-    test,
-    feature = "channel-discord",
-    feature = "channel-lark",
-    feature = "channel-matrix",
-    feature = "channel-slack",
-    feature = "channel-telegram",
-    feature = "channel-wechat",
-    feature = "whatsapp-web",
-))]
+#[cfg(test)]
 fn one_shot_channel_workspace_dir(config: &Config, channel_type: &str, alias: &str) -> PathBuf {
     config.channel_workspace_dir(&format!("{channel_type}.{alias}"))
 }
 
 /// Build a single channel instance by config section name (e.g. "telegram").
+#[cfg(test)]
 fn build_channel_by_id(
     config_arc: &Arc<RwLock<Config>>,
     channel_id: &str,
@@ -6696,13 +6688,7 @@ pub async fn send_channel_message(
     recipient: &str,
     message: &str,
 ) -> Result<()> {
-    // Wrap into the canonical shared handle for the builder; this is a
-    // one-shot path so the snapshot is dropped immediately after send.
-    let config_arc = Arc::new(RwLock::new(config.clone()));
-    let channel = build_channel_by_id(&config_arc, channel_id)?;
-    let msg = SendMessage::new(message, recipient);
-    channel
-        .send(&msg)
+    deliver_announcement(config, channel_id, recipient, None, message)
         .await
         .with_context(|| format!("Failed to send message via {channel_id}"))?;
     println!("Message sent via {channel_id}.");
