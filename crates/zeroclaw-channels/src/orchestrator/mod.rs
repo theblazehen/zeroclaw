@@ -5917,7 +5917,10 @@ fn build_channel_by_id(
 ) -> Result<Arc<dyn Channel>> {
     #[allow(unused_variables)]
     let config = config_arc.read();
-    match channel_id {
+    let (channel_type, requested_alias) = channel_id
+        .split_once('.')
+        .map_or((channel_id, None), |(kind, alias)| (kind, Some(alias)));
+    match channel_type {
         #[cfg(feature = "channel-telegram")]
         "telegram" => {
             let tg = config
@@ -6138,17 +6141,17 @@ fn build_channel_by_id(
         "whatsapp" | "whatsapp-web" | "whatsapp_web" => {
             #[cfg(feature = "whatsapp-web")]
             {
+                let alias = requested_alias.unwrap_or("default").to_string();
                 let wa = config
                     .channels
                     .whatsapp
-                    .get("default")
-                    .context("WhatsApp channel is not configured")?;
+                    .get(&alias)
+                    .with_context(|| format!("WhatsApp channel '{alias}' is not configured"))?;
                 if !wa.is_web_config() {
                     anyhow::bail!(
                         "WhatsApp channel send requires Web mode (set session_path, pair_phone, or mode = personal)"
                     );
                 }
-                let alias = "default".to_string();
                 let peer_resolver: Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
                     let cfg_arc = config_arc.clone();
                     let alias = alias.clone();
@@ -6678,8 +6681,8 @@ fn build_channel_by_id(
                 anyhow::bail!("Voice Call channel requires the `channel-voice-call` feature");
             }
         }
-        other => anyhow::bail!(
-            "Unknown channel '{other}'. Supported: telegram, discord, slack, mattermost, signal, \
+        _ => anyhow::bail!(
+            "Unknown channel '{channel_id}'. Supported: telegram, discord, slack, mattermost, signal, \
             matrix, whatsapp, qq, lark, feishu, dingtalk, wecom, wecom_ws, nextcloud_talk, wati, linq, \
             email, gmail_push, irc, twitter, mochat, imessage, line, voice-call"
         ),
