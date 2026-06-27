@@ -14,6 +14,7 @@
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use std::borrow::Cow;
+use std::path::{Path, PathBuf};
 use zeroclaw_config::schema::MediaPipelineConfig;
 
 use super::super::transcription::TranscriptionManager;
@@ -29,6 +30,7 @@ pub struct MediaPipeline<'a> {
     config: &'a MediaPipelineConfig,
     transcription_manager: Option<&'a TranscriptionManager>,
     vision_available: bool,
+    attachment_dir: Option<PathBuf>,
 }
 
 impl<'a> MediaPipeline<'a> {
@@ -45,14 +47,22 @@ impl<'a> MediaPipeline<'a> {
             config,
             transcription_manager,
             vision_available,
+            attachment_dir: None,
         }
+    }
+
+    pub fn with_attachment_dir(mut self, attachment_dir: impl Into<PathBuf>) -> Self {
+        self.attachment_dir = Some(attachment_dir.into());
+        self
     }
 
     /// Process a message's attachments and return enriched text.
     ///
-    /// If the pipeline is disabled via config, returns `original_text` unchanged.
+    /// If the pipeline is disabled via config, media-understanding features are
+    /// skipped, but document attachments are still materialized so the agent can
+    /// see a usable `[DOCUMENT:<path>]` marker.
     pub async fn process(&self, original_text: &str, attachments: &[MediaAttachment]) -> String {
-        if !self.config.enabled || attachments.is_empty() {
+        if attachments.is_empty() {
             return original_text.to_string();
         }
 
@@ -60,16 +70,20 @@ impl<'a> MediaPipeline<'a> {
 
         for attachment in attachments {
             match attachment.kind() {
-                MediaKind::Audio if self.config.transcribe_audio => {
+                MediaKind::Audio if self.config.enabled && self.config.transcribe_audio => {
                     let annotation = self.process_audio(attachment).await;
                     annotations.push(annotation);
                 }
-                MediaKind::Image if self.config.describe_images => {
+                MediaKind::Image if self.config.enabled && self.config.describe_images => {
                     let annotation = self.process_image(attachment);
                     annotations.push(annotation);
                 }
-                MediaKind::Video if self.config.summarize_video => {
+                MediaKind::Video if self.config.enabled && self.config.summarize_video => {
                     let annotation = self.process_video(attachment);
+                    annotations.push(annotation);
+                }
+                MediaKind::Unknown => {
+                    let annotation = self.process_document(attachment);
                     annotations.push(annotation);
                 }
                 _ => {}
@@ -146,6 +160,64 @@ impl<'a> MediaPipeline<'a> {
     /// For now we add a placeholder annotation.
     fn process_video(&self, attachment: &MediaAttachment) -> String {
         format!("[Video: {} attached]", attachment.file_name)
+    }
+
+    fn process_document(&self, attachment: &MediaAttachment) -> String {
+        let Some(attachment_dir) = &self.attachment_dir else {
+            return format!("[Document: {} attached]", attachment.file_name);
+        };
+
+        match materialize_attachment(attachment_dir, attachment) {
+            Ok(path) => format!(
+                "[Document: {} attached]\n[DOCUMENT:{}]",
+                attachment.file_name,
+                path.display()
+            ),
+            Err(err) => {
+                ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"file": attachment.file_name, "error": format!("{}", err)})), "Media pipeline: document materialization failed");
+                format!("[Document: {} attached]", attachment.file_name)
+            }
+        }
+    }
+}
+
+fn materialize_attachment(
+    base_dir: &Path,
+    attachment: &MediaAttachment,
+) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(base_dir)?;
+    let file_name = safe_attachment_file_name(&attachment.file_name);
+    let mut path = base_dir.join(&file_name);
+    let mut suffix = 1usize;
+    while path.exists() {
+        let candidate = if let Some((stem, ext)) = file_name.rsplit_once('.') {
+            format!("{stem}-{suffix}.{ext}")
+        } else {
+            format!("{file_name}-{suffix}")
+        };
+        path = base_dir.join(candidate);
+        suffix += 1;
+    }
+    std::fs::write(&path, &attachment.data)?;
+    Ok(path)
+}
+
+fn safe_attachment_file_name(name: &str) -> String {
+    let sanitized = name
+        .chars()
+        .map(|ch| match ch {
+            '/' | '\\' | '\0' => '_',
+            other if other.is_control() => '_',
+            other => other,
+        })
+        .collect::<String>()
+        .trim_matches([' ', '.'])
+        .to_string();
+
+    if sanitized.is_empty() {
+        "attachment.bin".to_string()
+    } else {
+        sanitized
     }
 }
 
@@ -226,6 +298,14 @@ mod tests {
             file_name: "clip.mp4".to_string(),
             data: vec![0u8; 200],
             mime_type: Some("video/mp4".to_string()),
+        }
+    }
+
+    fn sample_document() -> MediaAttachment {
+        MediaAttachment {
+            file_name: "forms.pdf".to_string(),
+            data: b"pdf bytes".to_vec(),
+            mime_type: Some("application/pdf".to_string()),
         }
     }
 
@@ -381,6 +461,61 @@ mod tests {
 
         let result = pipeline.process("", &[sample_audio()]).await;
         assert_eq!(result, "[Audio: attached]");
+    }
+
+    #[tokio::test]
+    async fn document_attachment_is_materialized_with_marker() {
+        let config = default_pipeline_config(true);
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let pipeline =
+            MediaPipeline::new(&config, None, false).with_attachment_dir(temp.path().to_path_buf());
+
+        let result = pipeline.process("", &[sample_document()]).await;
+        assert!(
+            result.contains("[Document: forms.pdf attached]"),
+            "missing document annotation: {result}"
+        );
+        assert!(
+            result.contains("[DOCUMENT:"),
+            "missing document marker: {result}"
+        );
+        assert!(
+            temp.path().join("forms.pdf").exists(),
+            "document was not written to disk"
+        );
+    }
+
+    #[tokio::test]
+    async fn document_attachment_filename_is_sanitized() {
+        let config = default_pipeline_config(true);
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let pipeline =
+            MediaPipeline::new(&config, None, false).with_attachment_dir(temp.path().to_path_buf());
+        let attachment = MediaAttachment {
+            file_name: "../forms.pdf".to_string(),
+            data: b"pdf bytes".to_vec(),
+            mime_type: Some("application/pdf".to_string()),
+        };
+
+        let result = pipeline.process("", &[attachment]).await;
+        assert!(result.contains("[DOCUMENT:"), "missing marker: {result}");
+        assert!(temp.path().join("_forms.pdf").exists());
+        assert!(!temp.path().join("..").join("forms.pdf").exists());
+    }
+
+    #[tokio::test]
+    async fn disabled_pipeline_still_materializes_documents() {
+        let config = default_pipeline_config(false);
+        let temp = tempfile::tempdir().expect("tempdir should be created");
+        let pipeline =
+            MediaPipeline::new(&config, None, false).with_attachment_dir(temp.path().to_path_buf());
+
+        let result = pipeline.process("[Document]", &[sample_document()]).await;
+        assert!(result.contains("[DOCUMENT:"), "missing marker: {result}");
+        assert!(
+            result.contains("[Document]"),
+            "missing original text: {result}"
+        );
     }
 
     #[tokio::test]

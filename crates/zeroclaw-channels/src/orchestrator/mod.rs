@@ -4087,7 +4087,7 @@ async fn process_channel_message_body(
     }
 
     // ── Media pipeline: enrich inbound message with media annotations ──
-    if ctx.media_pipeline.enabled && !msg.attachments.is_empty() {
+    if !msg.attachments.is_empty() {
         let vision = ctx.model_provider.supports_vision();
         let transcription_manager =
             crate::transcription::TranscriptionManager::new(&ctx.transcription_config)
@@ -4095,11 +4095,13 @@ async fn process_channel_message_body(
                 .map(|m| {
                     m.with_agent_transcription_provider(ctx.agent_transcription_provider.clone())
                 });
+        let attachment_dir = ctx.workspace_dir.join("attachments").join(&msg.id);
         let pipeline = media_pipeline::MediaPipeline::new(
             &ctx.media_pipeline,
             transcription_manager.as_ref(),
             vision,
-        );
+        )
+        .with_attachment_dir(attachment_dir);
         msg.content = Box::pin(pipeline.process(&msg.content, &msg.attachments)).await;
     }
 
