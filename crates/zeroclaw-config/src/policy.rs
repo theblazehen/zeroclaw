@@ -260,12 +260,13 @@ impl SecurityPolicy {
     /// True when `name` is admissible under the current policy.
     ///
     /// `allowed_tools = None` is unrestricted; `Some(list)` is the
-    /// allowlist. `excluded_tools` always subtracts.
+    /// allowlist. `"*"` inside `list` explicitly allows all tools.
+    /// `excluded_tools` always subtracts.
     pub fn is_tool_allowed(&self, name: &str) -> bool {
         let allowed = self
             .allowed_tools
             .as_ref()
-            .is_none_or(|list| list.iter().any(|t| t == name));
+            .is_none_or(|list| list.iter().any(|t| t == "*" || t == name));
         let excluded = self
             .excluded_tools
             .as_ref()
@@ -2765,6 +2766,28 @@ mod tests {
         assert!(p.is_tool_allowed("memory_recall"));
         assert!(!p.is_tool_allowed("spawn_subagent"));
         assert!(!p.is_tool_allowed("file_write"));
+    }
+
+    #[test]
+    fn is_tool_allowed_wildcard_allows_all_tools() {
+        let p = SecurityPolicy {
+            allowed_tools: Some(vec!["*".into()]),
+            ..SecurityPolicy::default()
+        };
+        assert!(p.is_tool_allowed("shell"));
+        assert!(p.is_tool_allowed("file_read"));
+        assert!(p.is_tool_allowed("spawn_subagent"));
+    }
+
+    #[test]
+    fn is_tool_allowed_excluded_overrides_wildcard() {
+        let p = SecurityPolicy {
+            allowed_tools: Some(vec!["*".into()]),
+            excluded_tools: Some(vec!["spawn_subagent".into()]),
+            ..SecurityPolicy::default()
+        };
+        assert!(p.is_tool_allowed("shell"));
+        assert!(!p.is_tool_allowed("spawn_subagent"));
     }
 
     #[test]
