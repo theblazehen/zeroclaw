@@ -710,6 +710,19 @@ impl WhatsAppWebChannel {
     }
 
     #[cfg(feature = "whatsapp-web")]
+    fn sanitize_whatsapp_file_name(name: &str) -> String {
+        name.chars()
+            .map(|ch| match ch {
+                '/' | '\\' | '\0' => '_',
+                other if other.is_control() => '_',
+                other => other,
+            })
+            .collect::<String>()
+            .trim_matches([' ', '.'])
+            .to_string()
+    }
+
+    #[cfg(feature = "whatsapp-web")]
     async fn push_downloaded_attachment(
         client: &whatsapp_rust::Client,
         downloadable: &dyn whatsapp_rust::download::Downloadable,
@@ -785,6 +798,33 @@ impl WhatsAppWebChannel {
             Self::push_downloaded_attachment(
                 client,
                 video.as_ref() as &dyn Downloadable,
+                file_name,
+                Some(mime),
+                attachments,
+            )
+            .await;
+        }
+
+        if let Some(ref document) = base.document_message {
+            let mime = document
+                .mimetype
+                .clone()
+                .unwrap_or_else(|| "application/octet-stream".to_string());
+            let file_name = document
+                .file_name
+                .as_deref()
+                .or(document.title.as_deref())
+                .map(Self::sanitize_whatsapp_file_name)
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| {
+                    format!(
+                        "{file_prefix}whatsapp-document.{}",
+                        Self::mime_extension(&mime, "bin")
+                    )
+                });
+            Self::push_downloaded_attachment(
+                client,
+                document.as_ref() as &dyn Downloadable,
                 file_name,
                 Some(mime),
                 attachments,
@@ -2067,6 +2107,16 @@ impl Channel for WhatsAppWebChannel {
                                             return;
                                         }
                                     };
+
+                                if !info.source.is_from_me {
+                                    let sender = if is_group { Some(&sender_jid) } else { None };
+                                    if let Err(e) = client
+                                        .mark_as_read(&info.source.chat, sender, vec![info.id.clone()])
+                                        .await
+                                    {
+                                        ::zeroclaw_log::record!(WARN, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_outcome(::zeroclaw_log::EventOutcome::Unknown).with_attrs(::serde_json::json!({"error": format!("{}", e)})), "failed to send WhatsApp read receipt");
+                                    }
+                                }
 
                                 let mut attachments = Vec::new();
                                 Self::collect_media_attachments(
@@ -3387,6 +3437,19 @@ mod tests {
         assert_eq!(
             WhatsAppWebChannel::mime_extension("image/../../png", "bin"),
             "bin"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "whatsapp-web")]
+    fn sanitize_whatsapp_file_name_blocks_paths() {
+        assert_eq!(
+            WhatsAppWebChannel::sanitize_whatsapp_file_name("../bank/forms.pdf"),
+            "_bank_forms.pdf"
+        );
+        assert_eq!(
+            WhatsAppWebChannel::sanitize_whatsapp_file_name(" report.pdf. "),
+            "report.pdf"
         );
     }
 
