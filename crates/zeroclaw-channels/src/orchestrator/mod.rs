@@ -4033,14 +4033,25 @@ async fn process_channel_message(
                 None,
                 None,
             );
-            process_channel_message_body(ctx, msg, cancellation_token, composite_for_body).await;
+            process_channel_message_body(
+                ctx,
+                msg,
+                cancellation_token.clone(),
+                composite_for_body,
+            )
+            .await;
+            let (status, summary) = if cancellation_token.is_cancelled() {
+                ("cancelled", "channel turn cancelled")
+            } else {
+                ("completed", "channel turn finished")
+            };
             let _ = zeroclaw_runtime::task_ledger::upsert_task(
                 config_for_ledger.as_ref(),
                 &ledger_agent,
                 &ledger_id,
                 &task_title,
-                "completed",
-                Some("channel turn finished"),
+                status,
+                Some(summary),
                 None,
             );
         }

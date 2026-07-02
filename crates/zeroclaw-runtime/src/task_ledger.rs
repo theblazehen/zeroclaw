@@ -31,7 +31,7 @@ fn open(path: &Path) -> Result<Connection> {
         .with_context(|| format!("failed to open task ledger {}", path.display()))?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS tasks (
-            task_id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL,
             owner_agent_id TEXT NOT NULL,
             title TEXT NOT NULL,
             status TEXT NOT NULL,
@@ -41,7 +41,8 @@ fn open(path: &Path) -> Result<Connection> {
             last_progress_at TEXT,
             result_summary TEXT,
             error_message TEXT,
-            metadata TEXT NOT NULL DEFAULT '{}'
+            metadata TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY (task_id, owner_agent_id)
         );
         CREATE INDEX IF NOT EXISTS idx_tasks_owner_status ON tasks(owner_agent_id, status);
         CREATE TABLE IF NOT EXISTS task_events (
@@ -72,8 +73,7 @@ pub fn upsert_task(
             task_id, owner_agent_id, title, status, created_at, updated_at,
             heartbeat_at, last_progress_at, result_summary, error_message
         ) VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?5, ?5, ?6, ?7)
-        ON CONFLICT(task_id) DO UPDATE SET
-            owner_agent_id = excluded.owner_agent_id,
+        ON CONFLICT(task_id, owner_agent_id) DO UPDATE SET
             title = excluded.title,
             status = excluded.status,
             updated_at = excluded.updated_at,
@@ -98,12 +98,12 @@ pub fn upsert_task(
     Ok(())
 }
 
-pub fn heartbeat(config: &Config, task_id: &str) -> Result<()> {
+pub fn heartbeat(config: &Config, owner_agent_id: &str, task_id: &str) -> Result<()> {
     let conn = open(&db_path(config))?;
     let now = Utc::now().to_rfc3339();
     conn.execute(
-        "UPDATE tasks SET heartbeat_at = ?1, updated_at = ?1 WHERE task_id = ?2",
-        params![now, task_id],
+        "UPDATE tasks SET heartbeat_at = ?1, updated_at = ?1 WHERE task_id = ?2 AND owner_agent_id = ?3",
+        params![now, task_id, owner_agent_id],
     )?;
     Ok(())
 }
@@ -164,11 +164,55 @@ mod tests {
             None,
         )
         .unwrap();
-        heartbeat(&config, "task-1").unwrap();
+        heartbeat(&config, "main", "task-1").unwrap();
         let tasks = list_tasks(&config, Some("main")).unwrap();
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].task_id, "task-1");
         assert_eq!(tasks[0].status, "in_progress");
         assert!(tasks[0].heartbeat_at.is_some());
+    }
+
+    #[test]
+    fn same_task_id_from_different_agents_does_not_overwrite() {
+        let tmp = TempDir::new().unwrap();
+        let mut config = Config::default();
+        config.data_dir = tmp.path().to_path_buf();
+
+        upsert_task(
+            &config,
+            "main",
+            "msg-123",
+            "WhatsApp message",
+            "in_progress",
+            None,
+            None,
+        )
+        .unwrap();
+        upsert_task(
+            &config,
+            "mail_triage",
+            "msg-123",
+            "Cron job output",
+            "in_progress",
+            None,
+            None,
+        )
+        .unwrap();
+
+        let main_tasks = list_tasks(&config, Some("main")).unwrap();
+        let cron_tasks = list_tasks(&config, Some("mail_triage")).unwrap();
+
+        // If task_id is globally unique, both agents should see their own task.
+        // If task_id collides, one agent's task is overwritten by the other.
+        assert_eq!(
+            main_tasks.len(),
+            1,
+            "agent 'main' should still see its task with the same task_id"
+        );
+        assert_eq!(
+            cron_tasks.len(),
+            1,
+            "agent 'mail_triage' should also see its task with the same task_id"
+        );
     }
 }

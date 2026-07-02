@@ -1017,7 +1017,10 @@ async fn deliver_to_agent(
         temp,
         vec![],
         false,
-        Some(std::path::PathBuf::from("cron-delivery-main")),
+        Some(std::path::PathBuf::from(format!(
+            "cron-delivery-{target_agent}-{job_id}",
+            job_id = job.id
+        ))),
         None,
         crate::agent::loop_::AgentRunOverrides::default(),
     )

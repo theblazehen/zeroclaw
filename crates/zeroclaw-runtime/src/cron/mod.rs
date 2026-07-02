@@ -155,6 +155,7 @@ pub fn update_shell_job_with_approval(
     if let Some(command) = patch.command.as_deref() {
         validate_shell_command(config, agent_alias, command, approved)?;
     }
+    validate_delivery_config(patch.delivery.as_ref())?;
     update_job(config, job_id, patch)
 }
 
@@ -501,6 +502,36 @@ mod tests {
             true,
         );
         assert!(approved.is_ok(), "{approved:?}");
+    }
+
+    #[test]
+    fn update_rejects_invalid_delivery_patch() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp);
+        let job = make_job(&config, "*/5 * * * *", None, "echo original");
+
+        let err = update_shell_job_with_approval(
+            &config,
+            "default",
+            &job.id,
+            CronJobPatch {
+                delivery: Some(DeliveryConfig {
+                    mode: "agent".into(),
+                    channel: None,
+                    to: None,
+                    thread_id: None,
+                    best_effort: true,
+                }),
+                ..CronJobPatch::default()
+            },
+            true,
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("delivery.to is required for agent mode")
+        );
     }
 
     #[test]

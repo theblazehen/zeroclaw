@@ -386,6 +386,7 @@ pub fn update_job(config: &Config, job_id: &str, patch: CronJobPatch) -> Result<
         job.enabled = enabled;
     }
     if let Some(delivery) = patch.delivery {
+        validate_delivery_config(Some(&delivery))?;
         job.delivery = delivery;
     }
     if let Some(model) = patch.model {
@@ -1865,6 +1866,51 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("unsupported delivery mode"));
+    }
+
+    #[test]
+    fn update_job_rejects_invalid_delivery_patch() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp);
+        let job = add_shell_job(
+            &config,
+            "default",
+            Some("deliver-shell".into()),
+            Schedule::Cron {
+                expr: "*/5 * * * *".into(),
+                tz: None,
+            },
+            "echo delivered",
+            Some(DeliveryConfig {
+                mode: "announce".into(),
+                channel: Some("discord".into()),
+                to: Some("1234567890".into()),
+                thread_id: None,
+                best_effort: true,
+            }),
+        )
+        .unwrap();
+
+        let err = update_job(
+            &config,
+            &job.id,
+            CronJobPatch {
+                delivery: Some(DeliveryConfig {
+                    mode: "agent".into(),
+                    channel: None,
+                    to: None,
+                    thread_id: None,
+                    best_effort: true,
+                }),
+                ..CronJobPatch::default()
+            },
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("delivery.to is required for agent mode")
+        );
     }
 
     #[test]
