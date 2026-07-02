@@ -11404,13 +11404,13 @@ impl Default for CronScheduleDecl {
 #[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
 #[prefix = "cron_delivery"]
 pub struct DeliveryConfigDecl {
-    /// Delivery mode: `"none"` or `"announce"`.
+    /// Delivery mode: `"none"`, `"announce"`, or `"agent"`.
     #[serde(default = "default_delivery_mode")]
     pub mode: String,
     /// Channel name (e.g. `"telegram"`, `"discord"`).
     #[serde(default)]
     pub channel: Option<String>,
-    /// Target/recipient identifier.
+    /// Target/recipient identifier (channel-specific for announce, agent alias for agent mode).
     #[serde(default)]
     pub to: Option<String>,
     /// Optional thread/conversation identifier carried into the outbound send.

@@ -1,6 +1,4 @@
-//! Whole-turn history trimming. One rule: keep the most recent whole turns
-//! that fit the token budget, drop the rest, never cut a turn in half.
-//!
+//! Whole-turn history compaction.
 //! A turn starts at a real user message and runs until the next real user
 //! message, covering the assistant reply, any assistant tool-call rows, and
 //! any tool-result rows in between. Tool exchanges live entirely inside a
@@ -24,6 +22,7 @@ pub struct TrimResult {
     pub tokens_before: usize,
     pub tokens_after: usize,
     pub trimmed: bool,
+    pub dropped_content: Vec<ChatMessage>,
 }
 
 fn is_turn_boundary(msg: &ChatMessage) -> bool {
@@ -49,6 +48,7 @@ pub fn trim_to_recent_turns(history: Vec<ChatMessage>, budget_tokens: usize) -> 
             tokens_before,
             tokens_after: tokens_before,
             trimmed: false,
+            dropped_content: Vec::new(),
         };
     }
 
@@ -72,6 +72,7 @@ pub fn trim_to_recent_turns(history: Vec<ChatMessage>, budget_tokens: usize) -> 
             tokens_before,
             tokens_after: tokens_before,
             trimmed: false,
+            dropped_content: Vec::new(),
         };
     }
 
@@ -95,11 +96,13 @@ pub fn trim_to_recent_turns(history: Vec<ChatMessage>, budget_tokens: usize) -> 
             tokens_before,
             tokens_after: tokens_before,
             trimmed: false,
+            dropped_content: Vec::new(),
         };
     }
 
     let dropped_messages = start;
     let dropped_turns = boundaries.iter().filter(|&&b| b < start).count();
+    let dropped_content: Vec<ChatMessage> = body[..start].to_vec();
     let mut kept = system;
     kept.extend_from_slice(&body[start..]);
     let kept_turns = total_turns - dropped_turns;
@@ -113,6 +116,7 @@ pub fn trim_to_recent_turns(history: Vec<ChatMessage>, budget_tokens: usize) -> 
         tokens_before,
         tokens_after,
         trimmed: true,
+        dropped_content,
     }
 }
 
@@ -132,6 +136,54 @@ fn count_turns(history: &[ChatMessage]) -> usize {
 /// earlier turns were cut and cannot confabulate dropped work as present.
 pub fn breadcrumb() -> ChatMessage {
     ChatMessage::user(crate::i18n::get_required_cli_string("history-trim-breadcrumb").as_str())
+}
+
+pub fn extract_dropped_summary(dropped: &[ChatMessage]) -> String {
+    if dropped.is_empty() {
+        return String::new();
+    }
+    let mut out = String::with_capacity(512);
+    out.push_str("[Prior conversation summary (compacted)]\n");
+    let mut in_turn = false;
+    let mut turn_user: Option<&str> = None;
+    let mut turn_asst: Option<&str> = None;
+    const MAX_LINE: usize = 200;
+    let flush = |tu: Option<&str>, ta: Option<&str>, out: &mut String| {
+        if let Some(u) = tu {
+            out.push_str("• ");
+            out.push_str(&truncate_first_line(u, MAX_LINE));
+            out.push('\n');
+        }
+        if let Some(a) = ta {
+            out.push_str("  → ");
+            out.push_str(&truncate_first_line(a, MAX_LINE));
+            out.push('\n');
+        }
+    };
+    for msg in dropped {
+        if is_turn_boundary(msg) {
+            if in_turn {
+                flush(turn_user.take(), turn_asst.take(), &mut out);
+            }
+            in_turn = true;
+            turn_user = Some(msg.content.as_str());
+            turn_asst = None;
+        } else if msg.role == "assistant" && turn_asst.is_none() && !msg.content.trim().is_empty() {
+            turn_asst = Some(msg.content.as_str());
+        }
+    }
+    flush(turn_user.take(), turn_asst.take(), &mut out);
+    out
+}
+
+fn truncate_first_line(s: &str, max: usize) -> String {
+    let first = s.lines().next().unwrap_or("").trim();
+    if first.chars().count() <= max {
+        first.to_string()
+    } else {
+        let truncated: String = first.chars().take(max.saturating_sub(3)).collect();
+        format!("{truncated}...")
+    }
 }
 
 #[cfg(test)]
@@ -268,6 +320,22 @@ mod tests {
     #[test]
     fn breadcrumb_is_user_role() {
         assert_eq!(breadcrumb().role, "user");
+    }
+
+    #[test]
+    fn extractive_summary_preserves_dropped_turn_signal() {
+        let h = vec![
+            sys("system"),
+            user("old user request"),
+            asst("old assistant answer"),
+            user("recent"),
+            asst("done"),
+        ];
+        let r = trim_to_recent_turns(h, 10);
+        assert!(r.trimmed);
+        let summary = extract_dropped_summary(&r.dropped_content);
+        assert!(summary.contains("old user request"));
+        assert!(summary.contains("old assistant answer"));
     }
 
     #[test]

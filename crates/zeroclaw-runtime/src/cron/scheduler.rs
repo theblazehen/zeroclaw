@@ -927,8 +927,16 @@ fn warn_if_high_frequency_agent_job(job: &CronJob) {
 
 async fn deliver_if_configured(config: &Config, job: &CronJob, output: &str) -> Result<()> {
     let delivery: &DeliveryConfig = &job.delivery;
-    if !delivery.mode.eq_ignore_ascii_case("announce") {
+    if delivery.mode.eq_ignore_ascii_case("none") || delivery.mode.trim().is_empty() {
         return Ok(());
+    }
+
+    if delivery.mode.eq_ignore_ascii_case("agent") {
+        return deliver_to_agent(config, job, delivery, output).await;
+    }
+
+    if !delivery.mode.eq_ignore_ascii_case("announce") {
+        anyhow::bail!("unsupported delivery mode: {}", delivery.mode);
     }
 
     let channel = delivery.channel.as_deref().ok_or_else(|| {
@@ -960,6 +968,61 @@ async fn deliver_if_configured(config: &Config, job: &CronJob, output: &str) -> 
         output,
     )
     .await
+}
+
+async fn deliver_to_agent(
+    config: &Config,
+    job: &CronJob,
+    delivery: &DeliveryConfig,
+    output: &str,
+) -> Result<()> {
+    let target_agent = delivery
+        .to
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow::Error::msg("delivery.to is required for agent mode"))?;
+
+    if config.agent(target_agent).is_none() {
+        anyhow::bail!("delivery.to names unknown agent: {target_agent}");
+    }
+
+    let source_agent = if job.agent_alias.trim().is_empty() {
+        resolve_owning_agent(config, job).unwrap_or("")
+    } else {
+        job.agent_alias.as_str()
+    };
+    let name = job.name.as_deref().unwrap_or(job.id.as_str());
+    let prompt = format!(
+        "[cron delivery]\n\
+         job_id: {job_id}\n\
+         job_name: {name}\n\
+         source_agent: {source_agent}\n\
+         delivery_mode: agent\n\n\
+         A scheduled job completed and produced the output below. Read it as internal runtime context. Decide whether any user-facing notification is warranted; if so, summarize and relay through the appropriate channel/tool. Do not forward raw output blindly.\n\n\
+         [cron output]\n{output}",
+        job_id = job.id
+    );
+
+    let temp = config
+        .model_provider_for_agent(target_agent)
+        .and_then(|entry| entry.temperature);
+
+    crate::agent::run(
+        config.clone(),
+        target_agent,
+        Some(prompt),
+        None,
+        None,
+        temp,
+        vec![],
+        false,
+        Some(std::path::PathBuf::from("cron-delivery-main")),
+        None,
+        crate::agent::loop_::AgentRunOverrides::default(),
+    )
+    .await
+    .map(|_| ())
 }
 
 /// Delivery function type — takes owned values so the returned future is 'static.

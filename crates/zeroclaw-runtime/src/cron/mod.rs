@@ -85,6 +85,20 @@ pub fn validate_delivery_config(delivery: Option<&DeliveryConfig>) -> Result<()>
     if delivery.mode.eq_ignore_ascii_case("none") {
         return Ok(());
     }
+
+    let has_target = delivery
+        .to
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty());
+
+    if delivery.mode.eq_ignore_ascii_case("agent") {
+        if !has_target {
+            bail!("delivery.to is required for agent mode");
+        }
+        return Ok(());
+    }
+
     if !delivery.mode.eq_ignore_ascii_case("announce") {
         bail!("unsupported delivery mode: {}", delivery.mode);
     }
@@ -100,11 +114,6 @@ pub fn validate_delivery_config(delivery: Option<&DeliveryConfig>) -> Result<()>
         bail!("delivery.channel is required for announce mode");
     }
 
-    let has_target = delivery
-        .to
-        .as_deref()
-        .map(str::trim)
-        .is_some_and(|value| !value.is_empty());
     if !has_target {
         bail!("delivery.to is required for announce mode");
     }
@@ -874,5 +883,33 @@ mod validate_delivery_tests {
             best_effort: true,
         };
         validate_delivery_config(Some(&delivery)).expect("webhook without thread_id must validate");
+    }
+
+    #[test]
+    fn validate_delivery_accepts_agent_mode_with_target_agent() {
+        let delivery = DeliveryConfig {
+            mode: "agent".into(),
+            channel: None,
+            to: Some("main".into()),
+            thread_id: None,
+            best_effort: true,
+        };
+        validate_delivery_config(Some(&delivery)).expect("agent delivery must validate");
+    }
+
+    #[test]
+    fn validate_delivery_rejects_agent_mode_without_target_agent() {
+        let delivery = DeliveryConfig {
+            mode: "agent".into(),
+            channel: None,
+            to: None,
+            thread_id: None,
+            best_effort: true,
+        };
+        let err = validate_delivery_config(Some(&delivery)).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("delivery.to is required for agent mode")
+        );
     }
 }

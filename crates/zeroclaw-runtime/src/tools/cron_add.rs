@@ -256,12 +256,12 @@ impl Tool for CronAddTool {
                 },
                 "delivery": {
                     "type": "object",
-                    "description": "Optional delivery config to send job output to a channel after each run. When provided, all three of mode, channel, and to are expected.",
+                    "description": "Optional delivery config after each run. Use mode='announce' to send output directly to a channel, mode='agent' to hand output to an agent for filtering/relay, or mode='none' to disable delivery.",
                     "properties": {
                         "mode": {
                             "type": "string",
-                            "enum": ["none", "announce"],
-                            "description": "'announce' sends output to the specified channel; 'none' disables delivery"
+                            "enum": ["none", "announce", "agent"],
+                            "description": "'announce' sends output to the specified channel; 'agent' hands output to delivery.to agent; 'none' disables delivery"
                         },
                         "channel": {
                             "type": "string",
@@ -270,7 +270,7 @@ impl Tool for CronAddTool {
                         },
                         "to": {
                             "type": "string",
-                            "description": "Destination ID: Discord channel ID, Telegram chat ID, Slack channel name, webhook recipient, etc."
+                            "description": "Destination ID for announce mode, or target agent alias for agent mode."
                         },
                         "thread_id": {
                             "type": "string",

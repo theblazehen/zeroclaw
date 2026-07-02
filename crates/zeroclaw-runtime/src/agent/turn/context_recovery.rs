@@ -88,6 +88,7 @@ pub(crate) async fn try_recover_context_overflow(
         let dropped_messages = result.dropped_messages;
         let kept_turns = result.kept_turns;
         let tokens_after = result.tokens_after;
+        let summary = crate::agent::history_trim::extract_dropped_summary(&result.dropped_content);
         let mut recovered_history = result.history;
         if trimmed {
             // Insert the same model-visible breadcrumb the turn-boundary path
@@ -99,6 +100,9 @@ pub(crate) async fn try_recover_context_overflow(
                 .take_while(|m| m.role == "system")
                 .count();
             recovered_history.insert(system_count, crate::agent::history_trim::breadcrumb());
+            if !summary.trim().is_empty() {
+                recovered_history.insert(system_count + 1, ChatMessage::user(summary));
+            }
         }
         *history = recovered_history;
         if trimmed {

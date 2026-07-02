@@ -2557,6 +2557,10 @@ pub async fn run(
                                     eff_max_context_tokens,
                                 );
                                 if result.trimmed {
+                                    let summary =
+                                        crate::agent::history_trim::extract_dropped_summary(
+                                            &result.dropped_content,
+                                        );
                                     let mut trimmed = result.history;
                                     let system_count =
                                         trimmed.iter().take_while(|m| m.role == "system").count();
@@ -2564,6 +2568,10 @@ pub async fn run(
                                         system_count,
                                         crate::agent::history_trim::breadcrumb(),
                                     );
+                                    if !summary.trim().is_empty() {
+                                        trimmed
+                                            .insert(system_count + 1, ChatMessage::user(summary));
+                                    }
                                     history = trimmed;
                                     {
                                         let __zc_trim_span = ::zeroclaw_log::info_span!(

@@ -40,7 +40,8 @@ impl Tool for ScheduleTool {
         "Manage scheduled shell-only tasks. Actions: create/add/once/list/get/cancel/remove/pause/resume. \
          WARNING: This tool creates shell jobs whose output is only logged, NOT delivered to any channel. \
          To send a scheduled message to Discord/Telegram/Slack/Matrix, use the cron_add tool with job_type='agent' \
-         and a delivery config like {\"mode\":\"announce\",\"channel\":\"discord\",\"to\":\"<channel_id>\"}."
+         and delivery config like {\"mode\":\"announce\",\"channel\":\"discord\",\"to\":\"<channel_id>\"}; \
+         to hand results to another agent for filtering/relay, use {\"mode\":\"agent\",\"to\":\"<agent_alias>\"}."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

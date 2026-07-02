@@ -393,9 +393,14 @@ pub async fn run_tool_call_loop(p: ToolLoop<'_>) -> Result<String> {
             let result =
                 crate::agent::history_trim::trim_to_recent_turns(taken, context_token_budget);
             if result.trimmed {
+                let summary =
+                    crate::agent::history_trim::extract_dropped_summary(&result.dropped_content);
                 let mut trimmed = result.history;
                 let system_count = trimmed.iter().take_while(|m| m.role == "system").count();
                 trimmed.insert(system_count, crate::agent::history_trim::breadcrumb());
+                if !summary.trim().is_empty() {
+                    trimmed.insert(system_count + 1, ChatMessage::user(summary));
+                }
                 *history = trimmed;
                 {
                     let __zc_trim_span = ::zeroclaw_log::info_span!(

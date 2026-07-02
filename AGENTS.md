@@ -82,6 +82,10 @@ Full pre-PR validation (recommended):
 
 Docs-only changes: run markdown lint and link-integrity checks. If touching bootstrap scripts: `bash -n install.sh`.
 
+## Dependency and System Library Policy
+
+Prefer Nix for system packages, shared libraries, and persistent development tools. Do not rely on `apt-get` for fixes in the live/pod environment: pod restarts wipe those installs. If a command fails because a binary or shared library is missing, use `nix shell` / `nix develop` / `nix run` or update the relevant Nix environment instead of installing via apt.
+
 ## Subagents
 
 Subagents (via `spawn_subagent` or cron `JobType::Agent`) inherit the parent's identity and permissions but run in isolated sessions. **Before running any shell commands or filesystem operations, subagents must explicitly set their working directory to the repository root** (the directory containing the top-level `Cargo.toml` and `AGENTS.md`). Do not assume the shell starts at repo root; always `cd` to it first (or use the equivalent in the tool's context).

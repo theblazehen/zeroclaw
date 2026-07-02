@@ -4011,6 +4011,9 @@ async fn process_channel_message(
     let sender = msg.sender.clone();
     let message_id = msg.id.clone();
     let composite_for_body = channel_composite.clone();
+    let task_title = format!("channel message from {} via {}", sender, channel_composite);
+    let ledger_agent_alias = Arc::clone(&agent_alias);
+    let ledger_message_id = message_id.clone();
     zeroclaw_log::scope!(
         category: "channel",
         agent_alias: agent_alias.as_str(),
@@ -4018,7 +4021,28 @@ async fn process_channel_message(
         sender: sender.as_str(),
         message_id: message_id.as_str(),
         => async move {
+            let config_for_ledger = Arc::clone(&ctx.prompt_config);
+            let ledger_agent = ledger_agent_alias.to_string();
+            let ledger_id = ledger_message_id.clone();
+            let _ = zeroclaw_runtime::task_ledger::upsert_task(
+                config_for_ledger.as_ref(),
+                &ledger_agent,
+                &ledger_id,
+                &task_title,
+                "in_progress",
+                None,
+                None,
+            );
             process_channel_message_body(ctx, msg, cancellation_token, composite_for_body).await;
+            let _ = zeroclaw_runtime::task_ledger::upsert_task(
+                config_for_ledger.as_ref(),
+                &ledger_agent,
+                &ledger_id,
+                &task_title,
+                "completed",
+                Some("channel turn finished"),
+                None,
+            );
         }
     )
     .await;
