@@ -2460,11 +2460,16 @@ impl RpcDispatcher {
         let config = self.ctx.config.read().clone();
         let job = crate::cron::get_job(&config, &req.id)
             .map_err(|e| rpc_err(INVALID_PARAMS, format!("Cron job not found: {e}")))?;
-        let (success, output) = crate::cron::scheduler::execute_job_now(&config, &job).await;
+        let outcome = crate::cron::scheduler::execute_and_record_manual_job(
+            &config,
+            &job,
+            crate::cron::scheduler::CronDeliveryContext::GatewayManual,
+        )
+        .await;
         to_result(CronTriggerResult {
             id: req.id,
-            success,
-            output,
+            success: outcome.success,
+            output: outcome.output,
         })
     }
 
@@ -4664,6 +4669,93 @@ mod tests {
                 "ACP session must NOT expose `{mem_tool}` — found in tool list: {tool_names:?}"
             );
         }
+    }
+    #[tokio::test]
+    async fn cron_trigger_delivers_and_records_manual_run() {
+        crate::cron::scheduler::register_delivery_fn(Box::new(
+            |_config, channel, _target, _thread_id, _output| {
+                Box::pin(async move {
+                    if channel == "fail-delivery" {
+                        anyhow::bail!("synthetic delivery failure");
+                    }
+                    Ok(())
+                })
+            },
+        ));
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut config = make_acp_test_config(&tmp);
+        config
+            .providers
+            .models
+            .ensure("openrouter", "test-provider")
+            .expect("known provider family");
+        config
+            .agents
+            .get_mut("test-agent")
+            .expect("test agent exists")
+            .model_provider = "openrouter.test-provider".into();
+        tokio::fs::create_dir_all(&config.data_dir).await.unwrap();
+        let job = crate::cron::add_shell_job_with_approval(
+            &config,
+            "test-agent",
+            None,
+            crate::cron::Schedule::Cron {
+                expr: "*/5 * * * *".into(),
+                tz: None,
+            },
+            "echo rpc-run-now",
+            Some(crate::cron::DeliveryConfig {
+                mode: "announce".into(),
+                channel: Some("fail-delivery".into()),
+                to: Some("123456".into()),
+                thread_id: None,
+                best_effort: true,
+            }),
+            true,
+        )
+        .unwrap();
+        config
+            .agents
+            .get_mut("test-agent")
+            .expect("test agent exists")
+            .cron_jobs
+            .push(job.id.clone());
+        let (dispatcher, _sessions) = make_acp_test_dispatcher(config.clone());
+
+        let response = dispatcher
+            .handle_cron_trigger(&json!({ "id": job.id }))
+            .await
+            .expect("cron trigger succeeds");
+        assert_eq!(response["success"], true);
+        assert!(
+            response["output"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("delivery failed: synthetic delivery failure"),
+            "RPC trigger must run cron delivery classification; response: {response:?}"
+        );
+
+        let runs = crate::cron::list_runs(&config, &job.id, 10).unwrap();
+        assert_eq!(runs.len(), 1, "RPC trigger must persist cron_runs history");
+        assert_eq!(runs[0].status, "degraded");
+        assert!(
+            runs[0]
+                .output
+                .as_deref()
+                .unwrap_or_default()
+                .contains("delivery failed: synthetic delivery failure")
+        );
+
+        let updated = crate::cron::get_job(&config, &job.id).unwrap();
+        assert_eq!(updated.last_status.as_deref(), Some("degraded"));
+        assert!(
+            updated
+                .last_output
+                .as_deref()
+                .unwrap_or_default()
+                .contains("delivery failed: synthetic delivery failure")
+        );
     }
 
     #[tokio::test]

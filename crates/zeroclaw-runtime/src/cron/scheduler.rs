@@ -58,6 +58,15 @@ pub struct CronDeliveryOutcome {
     pub output: String,
 }
 
+pub struct ManualCronRunOutcome {
+    pub success: bool,
+    pub status: String,
+    pub output: String,
+    pub duration_ms: i64,
+    pub started_at: DateTime<Utc>,
+    pub finished_at: DateTime<Utc>,
+}
+
 pub async fn deliver_and_classify_run_result(
     config: &Config,
     job: &CronJob,
@@ -405,6 +414,60 @@ pub async fn execute_job_now(config: &Config, job: &CronJob) -> (bool, String) {
     Box::pin(execute_job_with_retry(config, &security, &agent_alias, job))
         .instrument(span)
         .await
+}
+
+pub async fn execute_and_record_manual_job(
+    config: &Config,
+    job: &CronJob,
+    context: CronDeliveryContext,
+) -> ManualCronRunOutcome {
+    let started_at = Utc::now();
+    let (success, output) = Box::pin(execute_job_now(config, job)).await;
+    let finished_at = Utc::now();
+    let duration_ms = (finished_at - started_at).num_milliseconds();
+    let outcome = deliver_and_classify_run_result(config, job, success, output, context).await;
+
+    if let Err(e) = crate::cron::record_run(
+        config,
+        &job.id,
+        started_at,
+        finished_at,
+        &outcome.status,
+        Some(&outcome.output),
+        duration_ms,
+    ) {
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                .with_attrs(::serde_json::json!({"job_id": job.id, "error": format!("{}", e)})),
+            "manual cron trigger: failed to persist run history"
+        );
+    }
+    if let Err(e) = crate::cron::record_last_run_with_status(
+        config,
+        &job.id,
+        finished_at,
+        &outcome.status,
+        &outcome.output,
+    ) {
+        ::zeroclaw_log::record!(
+            WARN,
+            ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note)
+                .with_outcome(::zeroclaw_log::EventOutcome::Unknown)
+                .with_attrs(::serde_json::json!({"job_id": job.id, "error": format!("{}", e)})),
+            "manual cron trigger: failed to update last_run state"
+        );
+    }
+
+    ManualCronRunOutcome {
+        success: outcome.success,
+        status: outcome.status,
+        output: outcome.output,
+        duration_ms,
+        started_at,
+        finished_at,
+    }
 }
 
 fn cron_agent_run_security_policy(base: &SecurityPolicy, job: &CronJob) -> SecurityPolicy {
