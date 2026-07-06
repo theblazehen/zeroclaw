@@ -60,8 +60,8 @@ impl Tool for CronAddTool {
          Use job_type='agent' with a prompt to run the AI agent on schedule. \
          Use schedule.kind='at' for one-time reminders/delayed sends (recommended). \
          Agent jobs with schedule.kind='cron' or schedule.kind='every' are recurring and require explicit recurring confirmation. \
-         To deliver output to a channel (Discord, Telegram, Slack, Mattermost, QQ, Napcat, Lark, Feishu, Email), set \
-         delivery={\"mode\":\"announce\",\"channel\":\"discord\",\"to\":\"<channel_id_or_chat_id>\"}. \
+         To deliver output to a channel (Discord, Telegram, Slack, Mattermost, DingTalk, QQ, Napcat, Lark, Feishu, Email, WhatsApp, Matrix), set \
+         delivery={\"mode\":\"announce\",\"channel\":\"discord\",\"to\":\"<channel_id_or_chat_id>\"}; use mode='agent' or 'agent/relay' only when the output should be rewritten before delivery. \
          This is the preferred tool for sending scheduled/delayed messages to users via channels."
     }
 
@@ -89,11 +89,11 @@ impl Tool for CronAddTool {
                 },
                 "delivery": {
                     "type": "object",
-                    "description": "Delivery config to send job output to a channel. Example: {\"mode\":\"announce\",\"channel\":\"discord\",\"to\":\"<channel_id>\"}",
+                    "description": "Delivery config to send job output to a channel. Example: {\"mode\":\"announce\",\"channel\":\"discord\",\"to\":\"<channel_id>\"}. Use agent/agent-relay only when the user wants an agent to rewrite the job output before delivery.",
                     "properties": {
-                        "mode": { "type": "string", "enum": ["none", "announce"], "description": "Set to 'announce' to deliver output to a channel" },
-                        "channel": { "type": "string", "enum": ["telegram", "discord", "slack", "mattermost", "qq", "napcat", "lark", "feishu", "email"], "description": "Channel type to deliver to" },
-                        "to": { "type": "string", "description": "Target: Discord channel ID, Telegram chat ID, Slack channel, etc." },
+                        "mode": { "type": "string", "enum": ["none", "announce", "agent", "agent/relay"], "description": "Delivery mode: 'announce' sends output directly; 'agent' or 'agent/relay' rewrites output via an agent before sending" },
+                        "channel": { "type": "string", "enum": ["telegram", "discord", "slack", "mattermost", "dingtalk", "qq", "napcat", "lark", "feishu", "email", "whatsapp", "whatsapp_web", "matrix"], "description": "Channel type to deliver to" },
+                        "to": { "type": "string", "description": "Target: Discord channel ID, Telegram chat ID, Slack channel, WhatsApp peer, etc." },
                         "best_effort": { "type": "boolean", "description": "If true, delivery failure does not fail the job" }
                     }
                 },

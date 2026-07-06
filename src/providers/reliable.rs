@@ -204,6 +204,18 @@ fn compact_error_detail(err: &anyhow::Error) -> String {
         .join(" ")
 }
 
+fn chat_response_has_visible_output(response: &ChatResponse) -> bool {
+    response.has_tool_calls()
+        || response
+            .text
+            .as_deref()
+            .is_some_and(|text| !text.trim().is_empty())
+}
+
+fn empty_completion_error_detail() -> &'static str {
+    "provider returned empty completion"
+}
+
 fn push_failure(
     failures: &mut Vec<String>,
     provider_name: &str,
@@ -395,16 +407,45 @@ impl Provider for ReliableProvider {
                             .await
                         {
                             Ok(resp) => {
-                                if attempt > 0 || sent_model != model {
-                                    tracing::info!(
-                                        provider = provider_name,
-                                        model = sent_model,
-                                        attempt,
-                                        original_model = model,
-                                        "Provider recovered (failover/retry)"
+                                if resp.trim().is_empty() {
+                                    let error_detail = empty_completion_error_detail();
+                                    push_failure(
+                                        &mut failures,
+                                        provider_name,
+                                        sent_model,
+                                        attempt + 1,
+                                        self.max_retries + 1,
+                                        "retryable",
+                                        error_detail,
                                     );
+                                    if attempt < self.max_retries {
+                                        let wait = self.compute_backoff(
+                                            backoff_ms,
+                                            &anyhow::anyhow!(error_detail),
+                                        );
+                                        tracing::warn!(
+                                            provider = provider_name,
+                                            model = sent_model,
+                                            attempt = attempt + 1,
+                                            backoff_ms = wait,
+                                            error = error_detail,
+                                            "Empty completion; retrying"
+                                        );
+                                        tokio::time::sleep(Duration::from_millis(wait)).await;
+                                        backoff_ms = (backoff_ms.saturating_mul(2)).min(10_000);
+                                    }
+                                } else {
+                                    if attempt > 0 || sent_model != model {
+                                        tracing::info!(
+                                            provider = provider_name,
+                                            model = sent_model,
+                                            attempt,
+                                            original_model = model,
+                                            "Provider recovered (failover/retry)"
+                                        );
+                                    }
+                                    return Ok(resp);
                                 }
-                                return Ok(resp);
                             }
                             Err(e) => {
                                 let non_retryable_rate_limit = is_non_retryable_rate_limit(&e);
@@ -520,16 +561,45 @@ impl Provider for ReliableProvider {
                             .await
                         {
                             Ok(resp) => {
-                                if attempt > 0 || sent_model != model {
-                                    tracing::info!(
-                                        provider = provider_name,
-                                        model = sent_model,
-                                        attempt,
-                                        original_model = model,
-                                        "Provider recovered (failover/retry)"
+                                if resp.trim().is_empty() {
+                                    let error_detail = empty_completion_error_detail();
+                                    push_failure(
+                                        &mut failures,
+                                        provider_name,
+                                        sent_model,
+                                        attempt + 1,
+                                        self.max_retries + 1,
+                                        "retryable",
+                                        error_detail,
                                     );
+                                    if attempt < self.max_retries {
+                                        let wait = self.compute_backoff(
+                                            backoff_ms,
+                                            &anyhow::anyhow!(error_detail),
+                                        );
+                                        tracing::warn!(
+                                            provider = provider_name,
+                                            model = sent_model,
+                                            attempt = attempt + 1,
+                                            backoff_ms = wait,
+                                            error = error_detail,
+                                            "Empty completion; retrying"
+                                        );
+                                        tokio::time::sleep(Duration::from_millis(wait)).await;
+                                        backoff_ms = (backoff_ms.saturating_mul(2)).min(10_000);
+                                    }
+                                } else {
+                                    if attempt > 0 || sent_model != model {
+                                        tracing::info!(
+                                            provider = provider_name,
+                                            model = sent_model,
+                                            attempt,
+                                            original_model = model,
+                                            "Provider recovered (failover/retry)"
+                                        );
+                                    }
+                                    return Ok(resp);
                                 }
-                                return Ok(resp);
                             }
                             Err(e) => {
                                 let non_retryable_rate_limit = is_non_retryable_rate_limit(&e);
@@ -651,16 +721,45 @@ impl Provider for ReliableProvider {
                             .await
                         {
                             Ok(resp) => {
-                                if attempt > 0 || sent_model != model {
-                                    tracing::info!(
-                                        provider = provider_name,
-                                        model = sent_model,
-                                        attempt,
-                                        original_model = model,
-                                        "Provider recovered (failover/retry)"
+                                if !chat_response_has_visible_output(&resp) {
+                                    let error_detail = empty_completion_error_detail();
+                                    push_failure(
+                                        &mut failures,
+                                        provider_name,
+                                        sent_model,
+                                        attempt + 1,
+                                        self.max_retries + 1,
+                                        "retryable",
+                                        error_detail,
                                     );
+                                    if attempt < self.max_retries {
+                                        let wait = self.compute_backoff(
+                                            backoff_ms,
+                                            &anyhow::anyhow!(error_detail),
+                                        );
+                                        tracing::warn!(
+                                            provider = provider_name,
+                                            model = sent_model,
+                                            attempt = attempt + 1,
+                                            backoff_ms = wait,
+                                            error = error_detail,
+                                            "Empty completion; retrying"
+                                        );
+                                        tokio::time::sleep(Duration::from_millis(wait)).await;
+                                        backoff_ms = (backoff_ms.saturating_mul(2)).min(10_000);
+                                    }
+                                } else {
+                                    if attempt > 0 || sent_model != model {
+                                        tracing::info!(
+                                            provider = provider_name,
+                                            model = sent_model,
+                                            attempt,
+                                            original_model = model,
+                                            "Provider recovered (failover/retry)"
+                                        );
+                                    }
+                                    return Ok(resp);
                                 }
-                                return Ok(resp);
                             }
                             Err(e) => {
                                 let non_retryable_rate_limit = is_non_retryable_rate_limit(&e);
@@ -767,16 +866,45 @@ impl Provider for ReliableProvider {
                         };
                         match provider.chat(req, sent_model, temperature).await {
                             Ok(resp) => {
-                                if attempt > 0 || sent_model != model {
-                                    tracing::info!(
-                                        provider = provider_name,
-                                        model = sent_model,
-                                        attempt,
-                                        original_model = model,
-                                        "Provider recovered (failover/retry)"
+                                if !chat_response_has_visible_output(&resp) {
+                                    let error_detail = empty_completion_error_detail();
+                                    push_failure(
+                                        &mut failures,
+                                        provider_name,
+                                        sent_model,
+                                        attempt + 1,
+                                        self.max_retries + 1,
+                                        "retryable",
+                                        error_detail,
                                     );
+                                    if attempt < self.max_retries {
+                                        let wait = self.compute_backoff(
+                                            backoff_ms,
+                                            &anyhow::anyhow!(error_detail),
+                                        );
+                                        tracing::warn!(
+                                            provider = provider_name,
+                                            model = sent_model,
+                                            attempt = attempt + 1,
+                                            backoff_ms = wait,
+                                            error = error_detail,
+                                            "Empty completion; retrying"
+                                        );
+                                        tokio::time::sleep(Duration::from_millis(wait)).await;
+                                        backoff_ms = (backoff_ms.saturating_mul(2)).min(10_000);
+                                    }
+                                } else {
+                                    if attempt > 0 || sent_model != model {
+                                        tracing::info!(
+                                            provider = provider_name,
+                                            model = sent_model,
+                                            attempt,
+                                            original_model = model,
+                                            "Provider recovered (failover/retry)"
+                                        );
+                                    }
+                                    return Ok(resp);
                                 }
-                                return Ok(resp);
                             }
                             Err(e) => {
                                 let non_retryable_rate_limit = is_non_retryable_rate_limit(&e);
@@ -1882,6 +2010,41 @@ mod tests {
         }
     }
 
+    struct ScriptedNativeToolMock {
+        calls: Arc<AtomicUsize>,
+        responses: parking_lot::Mutex<std::collections::VecDeque<ChatResponse>>,
+    }
+
+    #[async_trait]
+    impl Provider for ScriptedNativeToolMock {
+        async fn chat_with_system(
+            &self,
+            _system_prompt: Option<&str>,
+            _message: &str,
+            _model: &str,
+            _temperature: f64,
+        ) -> anyhow::Result<String> {
+            anyhow::bail!("chat_with_system should not be used by ScriptedNativeToolMock");
+        }
+
+        fn supports_native_tools(&self) -> bool {
+            true
+        }
+
+        async fn chat(
+            &self,
+            _request: ChatRequest<'_>,
+            _model: &str,
+            _temperature: f64,
+        ) -> anyhow::Result<ChatResponse> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.responses
+                .lock()
+                .pop_front()
+                .ok_or_else(|| anyhow::anyhow!("scripted native provider exhausted responses"))
+        }
+    }
+
     #[tokio::test]
     async fn chat_delegates_to_inner_provider() {
         let calls = Arc::new(AtomicUsize::new(0));
@@ -1952,6 +2115,58 @@ mod tests {
         assert!(
             calls.load(Ordering::SeqCst) > 1,
             "should have retried at least once"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_retries_empty_text_without_tool_calls_then_recovers() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = ReliableProvider::new(
+            vec![(
+                "primary".into(),
+                Box::new(ScriptedNativeToolMock {
+                    calls: Arc::clone(&calls),
+                    responses: parking_lot::Mutex::new(std::collections::VecDeque::from(vec![
+                        ChatResponse {
+                            text: Some("  \n\t  ".to_string()),
+                            tool_calls: Vec::new(),
+                            usage: None,
+                            reasoning_content: None,
+                            quota_metadata: None,
+                            stop_reason: None,
+                            raw_stop_reason: None,
+                        },
+                        ChatResponse {
+                            text: Some("recovered after empty response".to_string()),
+                            tool_calls: Vec::new(),
+                            usage: None,
+                            reasoning_content: None,
+                            quota_metadata: None,
+                            stop_reason: None,
+                            raw_stop_reason: None,
+                        },
+                    ])),
+                }) as Box<dyn Provider>,
+            )],
+            1,
+            1,
+        );
+
+        let messages = vec![ChatMessage::user("test")];
+        let request = ChatRequest {
+            messages: &messages,
+            tools: None,
+        };
+        let result = provider.chat(request, "test-model", 0.0).await.unwrap();
+
+        assert_eq!(
+            result.text.as_deref(),
+            Some("recovered after empty response")
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "empty semantic responses without tool calls should consume a retry"
         );
     }
 
