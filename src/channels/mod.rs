@@ -78,8 +78,8 @@ pub use whatsapp_web::WhatsAppWebChannel;
 
 use crate::agent::loop_::{
     build_shell_policy_instructions, build_tool_instructions_from_specs,
-    run_tool_call_loop_with_non_cli_approval_context, scrub_credentials, NonCliApprovalContext,
-    NonCliApprovalPrompt, SafetyHeartbeatConfig,
+    run_tool_call_loop_with_non_cli_approval_context, scope_active_run_steering, scrub_credentials,
+    ActiveRunSteeringMessage, NonCliApprovalContext, NonCliApprovalPrompt, SafetyHeartbeatConfig,
 };
 use crate::agent::session::{resolve_session_id, shared_session_manager, Session, SessionManager};
 use crate::approval::{ApprovalManager, ApprovalResponse, PendingApprovalError};
@@ -106,6 +106,8 @@ use tokio_util::sync::CancellationToken;
 /// Per-sender conversation history for channel messages.
 type ConversationHistoryMap = Arc<Mutex<HashMap<String, Vec<ChatMessage>>>>;
 type ConversationLockMap = Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>;
+type ActiveSteeringRegistry =
+    Arc<tokio::sync::Mutex<HashMap<String, tokio::sync::mpsc::Sender<ActiveRunSteeringMessage>>>>;
 /// Maximum history messages to keep per sender.
 const MAX_CHANNEL_HISTORY: usize = 50;
 /// Minimum user-message length (in chars) for auto-save to memory.
@@ -422,6 +424,27 @@ fn conversation_history_key(msg: &traits::ChannelMessage) -> String {
 
 fn interruption_scope_key(msg: &traits::ChannelMessage) -> String {
     format!("{}_{}_{}", msg.channel, msg.reply_target, msg.sender)
+}
+
+fn steering_scope_key(msg: &traits::ChannelMessage) -> String {
+    format!(
+        "{}_{}_{}_{}",
+        msg.channel,
+        msg.reply_target,
+        msg.sender,
+        msg.thread_ts.as_deref().unwrap_or("")
+    )
+}
+
+fn steering_message_from_channel(msg: &traits::ChannelMessage) -> ActiveRunSteeringMessage {
+    ActiveRunSteeringMessage {
+        channel: msg.channel.clone(),
+        sender: msg.sender.clone(),
+        reply_target: msg.reply_target.clone(),
+        content: msg.content.clone(),
+        timestamp: msg.timestamp,
+        thread_ts: msg.thread_ts.clone(),
+    }
 }
 
 fn should_prefix_sender_identity(msg: &traits::ChannelMessage) -> bool {
@@ -4562,8 +4585,98 @@ async fn run_message_dispatch_loop(
         InFlightSenderTaskState,
     >::new()));
     let task_sequence = Arc::new(AtomicU64::new(1));
+    let active_steering: ActiveSteeringRegistry = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
 
     while let Some(msg) = rx.recv().await {
+        let runtime_defaults = runtime_defaults_snapshot(ctx.as_ref());
+        let interrupt_enabled =
+            runtime_defaults.interrupt_on_new_message && msg.channel == "telegram";
+        if interrupt_enabled {
+            let permit = match Arc::clone(&semaphore).acquire_owned().await {
+                Ok(permit) => permit,
+                Err(_) => break,
+            };
+
+            let worker_ctx = Arc::clone(&ctx);
+            let in_flight = Arc::clone(&in_flight_by_sender);
+            let task_sequence = Arc::clone(&task_sequence);
+            workers.spawn(async move {
+                let _permit = permit;
+                let sender_scope_key = interruption_scope_key(&msg);
+                let cancellation_token = CancellationToken::new();
+                let completion = Arc::new(InFlightTaskCompletion::new());
+                let task_id = task_sequence.fetch_add(1, Ordering::Relaxed);
+
+                let previous = {
+                    let mut active = in_flight.lock().await;
+                    active.insert(
+                        sender_scope_key.clone(),
+                        InFlightSenderTaskState {
+                            task_id,
+                            cancellation: cancellation_token.clone(),
+                            completion: Arc::clone(&completion),
+                        },
+                    )
+                };
+
+                if let Some(previous) = previous {
+                    tracing::info!(
+                        channel = %msg.channel,
+                        sender = %msg.sender,
+                        "Interrupting previous in-flight request for sender"
+                    );
+                    previous.cancellation.cancel();
+                    previous.completion.wait().await;
+                }
+
+                Box::pin(process_channel_message(worker_ctx, msg, cancellation_token)).await;
+
+                let mut active = in_flight.lock().await;
+                if active
+                    .get(&sender_scope_key)
+                    .is_some_and(|state| state.task_id == task_id)
+                {
+                    active.remove(&sender_scope_key);
+                }
+
+                completion.mark_done();
+            });
+
+            while let Some(result) = workers.try_join_next() {
+                log_worker_join_result(result);
+            }
+            continue;
+        }
+
+        let steering_scope = steering_scope_key(&msg);
+        let active_steering_tx = {
+            let active = active_steering.lock().await;
+            active.get(&steering_scope).cloned()
+        };
+        if let Some(tx) = active_steering_tx {
+            match tx.try_send(steering_message_from_channel(&msg)) {
+                Ok(()) => {
+                    tracing::info!(
+                        channel = %msg.channel,
+                        sender = %msg.sender,
+                        "Steered inbound message into active run"
+                    );
+                    continue;
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    let mut active = active_steering.lock().await;
+                    active.remove(&steering_scope);
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    tracing::warn!(
+                        channel = %msg.channel,
+                        sender = %msg.sender,
+                        "Active-run steering queue full; falling back to normal dispatch"
+                    );
+                }
+            }
+        }
+
         let permit = match Arc::clone(&semaphore).acquire_owned().await {
             Ok(permit) => permit,
             Err(_) => break,
@@ -4572,6 +4685,8 @@ async fn run_message_dispatch_loop(
         let worker_ctx = Arc::clone(&ctx);
         let in_flight = Arc::clone(&in_flight_by_sender);
         let task_sequence = Arc::clone(&task_sequence);
+        let active_steering = Arc::clone(&active_steering);
+        let steering_scope = steering_scope.clone();
         workers.spawn(async move {
             let _permit = permit;
             let runtime_defaults = runtime_defaults_snapshot(worker_ctx.as_ref());
@@ -4606,7 +4721,22 @@ async fn run_message_dispatch_loop(
                 }
             }
 
-            Box::pin(process_channel_message(worker_ctx, msg, cancellation_token)).await;
+            let (steering_tx, steering_rx) = tokio::sync::mpsc::channel(32);
+            {
+                let mut active = active_steering.lock().await;
+                active.insert(steering_scope.clone(), steering_tx);
+            }
+
+            scope_active_run_steering(
+                steering_rx,
+                Box::pin(process_channel_message(worker_ctx, msg, cancellation_token)),
+            )
+            .await;
+
+            {
+                let mut active = active_steering.lock().await;
+                active.remove(&steering_scope);
+            }
 
             if interrupt_enabled {
                 let mut active = in_flight.lock().await;
@@ -6173,16 +6303,22 @@ mod tests {
         tmp
     }
 
-    fn mock_price_approved_manager() -> Arc<ApprovalManager> {
+    fn approved_manager_for(tools: &[&str]) -> Arc<ApprovalManager> {
         let mut autonomy = crate::config::AutonomyConfig::default();
-        if !autonomy
-            .auto_approve
-            .iter()
-            .any(|tool| tool == "mock_price")
-        {
-            autonomy.auto_approve.push("mock_price".to_string());
+        for tool in tools {
+            if !autonomy
+                .auto_approve
+                .iter()
+                .any(|approved| approved == tool)
+            {
+                autonomy.auto_approve.push((*tool).to_string());
+            }
         }
         Arc::new(ApprovalManager::from_config(&autonomy))
+    }
+
+    fn mock_price_approved_manager() -> Arc<ApprovalManager> {
+        approved_manager_for(&["mock_price"])
     }
 
     #[test]
@@ -7047,6 +7183,126 @@ BTC is currently around $65,000 based on latest tool output."#
             };
             tokio::time::sleep(self.delay).await;
             Ok(format!("response-{call_index}"))
+        }
+    }
+
+    struct FinalSteeringRaceProvider {
+        delay: Duration,
+        calls: std::sync::Mutex<Vec<Vec<(String, String)>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for FinalSteeringRaceProvider {
+        async fn chat_with_system(
+            &self,
+            _system_prompt: Option<&str>,
+            _message: &str,
+            _model: &str,
+            _temperature: f64,
+        ) -> anyhow::Result<String> {
+            Ok("fallback".to_string())
+        }
+
+        async fn chat_with_history(
+            &self,
+            messages: &[ChatMessage],
+            _model: &str,
+            _temperature: f64,
+        ) -> anyhow::Result<String> {
+            let snapshot = messages
+                .iter()
+                .map(|m| (m.role.clone(), m.content.clone()))
+                .collect::<Vec<_>>();
+            self.calls
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(snapshot);
+            tokio::time::sleep(self.delay).await;
+
+            if messages
+                .iter()
+                .any(|msg| msg.role == "user" && msg.content.contains("late update"))
+            {
+                Ok("final-with-steering".to_string())
+            } else {
+                Ok("stale-final".to_string())
+            }
+        }
+    }
+    struct ToolBoundaryCaptureProvider {
+        calls: std::sync::Mutex<Vec<Vec<(String, String)>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for ToolBoundaryCaptureProvider {
+        async fn chat_with_system(
+            &self,
+            _system_prompt: Option<&str>,
+            _message: &str,
+            _model: &str,
+            _temperature: f64,
+        ) -> anyhow::Result<String> {
+            Ok("fallback".to_string())
+        }
+
+        async fn chat_with_history(
+            &self,
+            messages: &[ChatMessage],
+            _model: &str,
+            _temperature: f64,
+        ) -> anyhow::Result<String> {
+            let snapshot = messages
+                .iter()
+                .map(|m| (m.role.clone(), m.content.clone()))
+                .collect::<Vec<_>>();
+            self.calls
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(snapshot);
+
+            if messages
+                .iter()
+                .any(|msg| msg.role == "user" && msg.content.starts_with("[Tool results]"))
+            {
+                Ok("active-run-final".to_string())
+            } else {
+                Ok(r#"<tool_call>{"name":"slow_echo","arguments":{"text":"after-boundary"}}</tool_call>"#.to_string())
+            }
+        }
+    }
+
+    struct SlowEchoTool;
+
+    #[async_trait::async_trait]
+    impl Tool for SlowEchoTool {
+        fn name(&self) -> &str {
+            "slow_echo"
+        }
+
+        fn description(&self) -> &str {
+            "Echo input after a short deterministic delay"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "text": { "type": "string" }
+                }
+            })
+        }
+
+        async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            let text = args
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            Ok(ToolResult {
+                success: true,
+                output: format!("echoed:{text}"),
+                error: None,
+            })
         }
     }
 
@@ -10805,7 +11061,7 @@ BTC is currently around $65,000 based on latest tool output."#
             provider_runtime_options: providers::ProviderRuntimeOptions::default(),
             workspace_dir: Arc::new(std::env::temp_dir()),
             message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
-            interrupt_on_new_message: true,
+            interrupt_on_new_message: false,
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             non_cli_excluded_tools: Arc::new(Mutex::new(Vec::new())),
@@ -10852,6 +11108,211 @@ BTC is currently around $65,000 based on latest tool output."#
         assert_eq!(sent_messages.len(), 2);
         assert!(sent_messages.iter().any(|msg| msg.starts_with("chat-1:")));
         assert!(sent_messages.iter().any(|msg| msg.starts_with("chat-2:")));
+    }
+
+    #[tokio::test]
+    async fn message_dispatch_steers_same_scope_message_into_active_tool_run() {
+        let channel_impl = Arc::new(TelegramRecordingChannel::default());
+        let channel: Arc<dyn Channel> = channel_impl.clone();
+
+        let mut channels_by_name = HashMap::new();
+        channels_by_name.insert(channel.name().to_string(), channel);
+
+        let provider_impl = Arc::new(ToolBoundaryCaptureProvider {
+            calls: std::sync::Mutex::new(Vec::new()),
+        });
+
+        let runtime_ctx = Arc::new(ChannelRuntimeContext {
+            channels_by_name: Arc::new(channels_by_name),
+            provider: provider_impl.clone(),
+            default_provider: Arc::new("test-provider".to_string()),
+            memory: Arc::new(NoopMemory),
+            tools_registry: Arc::new(vec![Box::new(SlowEchoTool) as Box<dyn Tool>]),
+            observer: Arc::new(NoopObserver),
+            system_prompt: Arc::new("test-system-prompt".to_string()),
+            model: Arc::new("test-model".to_string()),
+            temperature: 0.0,
+            auto_save_memory: false,
+            max_tool_iterations: 10,
+            min_relevance_score: 0.0,
+            conversation_histories: Arc::new(Mutex::new(HashMap::new())),
+            conversation_locks: Default::default(),
+            session_config: crate::config::AgentSessionConfig::default(),
+            session_manager: None,
+            provider_cache: Arc::new(Mutex::new(HashMap::new())),
+            route_overrides: Arc::new(Mutex::new(HashMap::new())),
+            api_key: None,
+            api_url: None,
+            reliability: Arc::new(crate::config::ReliabilityConfig::default()),
+            provider_runtime_options: providers::ProviderRuntimeOptions::default(),
+            workspace_dir: Arc::new(std::env::temp_dir()),
+            message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
+            interrupt_on_new_message: false,
+            multimodal: crate::config::MultimodalConfig::default(),
+            hooks: None,
+            non_cli_excluded_tools: Arc::new(Mutex::new(Vec::new())),
+            query_classification: crate::config::QueryClassificationConfig::default(),
+            model_routes: Vec::new(),
+            approval_manager: approved_manager_for(&["slow_echo"]),
+            safety_heartbeat: None,
+            startup_perplexity_filter: crate::config::PerplexityFilterConfig::default(),
+        });
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(8);
+        let send_task = tokio::spawn(async move {
+            tx.send(traits::ChannelMessage {
+                id: "msg-1".to_string(),
+                sender: "user_a".to_string(),
+                reply_target: "chat_a".to_string(),
+                content: "start slow tool work".to_string(),
+                channel: "telegram".to_string(),
+                timestamp: 1,
+                thread_ts: None,
+            })
+            .await
+            .unwrap();
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            tx.send(traits::ChannelMessage {
+                id: "msg-2".to_string(),
+                sender: "user_a".to_string(),
+                reply_target: "chat_a".to_string(),
+                content: "please include this update".to_string(),
+                channel: "telegram".to_string(),
+                timestamp: 2,
+                thread_ts: None,
+            })
+            .await
+            .unwrap();
+        });
+
+        run_message_dispatch_loop(rx, runtime_ctx, 4).await;
+        send_task.await.unwrap();
+
+        let sent_messages = channel_impl.sent_messages.lock().await;
+        assert_eq!(
+            sent_messages.len(),
+            1,
+            "same-scope message should steer into the active run instead of starting a second response"
+        );
+        assert!(sent_messages[0].starts_with("chat_a:"));
+        assert!(sent_messages[0].contains("active-run-final"));
+        drop(sent_messages);
+
+        let calls = provider_impl
+            .calls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        assert_eq!(
+            calls.len(),
+            2,
+            "steering should reuse the active run's next provider decision after the tool boundary"
+        );
+        let second_call = &calls[1];
+        assert!(
+            second_call.iter().any(|(role, content)| role == "user"
+                && content.contains("please include this update")),
+            "second provider call should include same-scope inbound message as an active-run interjection; got {second_call:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn message_dispatch_drains_steering_before_final_answer_returns() {
+        let channel_impl = Arc::new(RecordingChannel::default());
+        let channel: Arc<dyn Channel> = channel_impl.clone();
+
+        let mut channels_by_name = HashMap::new();
+        channels_by_name.insert(channel.name().to_string(), channel);
+
+        let provider_impl = Arc::new(FinalSteeringRaceProvider {
+            delay: Duration::from_millis(120),
+            calls: std::sync::Mutex::new(Vec::new()),
+        });
+
+        let runtime_ctx = Arc::new(ChannelRuntimeContext {
+            channels_by_name: Arc::new(channels_by_name),
+            provider: provider_impl.clone(),
+            default_provider: Arc::new("test-provider".to_string()),
+            memory: Arc::new(NoopMemory),
+            tools_registry: Arc::new(vec![]),
+            observer: Arc::new(NoopObserver),
+            system_prompt: Arc::new("test-system-prompt".to_string()),
+            model: Arc::new("test-model".to_string()),
+            temperature: 0.0,
+            auto_save_memory: false,
+            max_tool_iterations: 10,
+            min_relevance_score: 0.0,
+            conversation_histories: Arc::new(Mutex::new(HashMap::new())),
+            conversation_locks: Default::default(),
+            session_config: crate::config::AgentSessionConfig::default(),
+            session_manager: None,
+            provider_cache: Arc::new(Mutex::new(HashMap::new())),
+            route_overrides: Arc::new(Mutex::new(HashMap::new())),
+            api_key: None,
+            api_url: None,
+            reliability: Arc::new(crate::config::ReliabilityConfig::default()),
+            provider_runtime_options: providers::ProviderRuntimeOptions::default(),
+            workspace_dir: Arc::new(std::env::temp_dir()),
+            message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
+            interrupt_on_new_message: false,
+            multimodal: crate::config::MultimodalConfig::default(),
+            hooks: None,
+            non_cli_excluded_tools: Arc::new(Mutex::new(Vec::new())),
+            query_classification: crate::config::QueryClassificationConfig::default(),
+            model_routes: Vec::new(),
+            approval_manager: mock_price_approved_manager(),
+            safety_heartbeat: None,
+            startup_perplexity_filter: crate::config::PerplexityFilterConfig::default(),
+        });
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(8);
+        let send_task = tokio::spawn(async move {
+            tx.send(traits::ChannelMessage {
+                id: "msg-final-1".to_string(),
+                sender: "user_a".to_string(),
+                reply_target: "chat_a".to_string(),
+                content: "produce final answer".to_string(),
+                channel: "test-channel".to_string(),
+                timestamp: 1,
+                thread_ts: None,
+            })
+            .await
+            .unwrap();
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            tx.send(traits::ChannelMessage {
+                id: "msg-final-2".to_string(),
+                sender: "user_a".to_string(),
+                reply_target: "chat_a".to_string(),
+                content: "late update".to_string(),
+                channel: "test-channel".to_string(),
+                timestamp: 2,
+                thread_ts: None,
+            })
+            .await
+            .unwrap();
+        });
+
+        run_message_dispatch_loop(rx, runtime_ctx, 4).await;
+        send_task.await.unwrap();
+
+        let sent_messages = channel_impl.sent_messages.lock().await;
+        assert_eq!(
+            sent_messages.len(),
+            1,
+            "late steering before final return should revise the active run instead of spawning a follow-up response"
+        );
+        assert!(sent_messages[0].contains("final-with-steering"));
+        assert!(!sent_messages[0].contains("stale-final"));
+        drop(sent_messages);
+
+        let calls = provider_impl
+            .calls
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        assert_eq!(
+            calls.len(),
+            2,
+            "pending steering at final-answer boundary should force one more provider decision"
+        );
     }
 
     #[tokio::test]

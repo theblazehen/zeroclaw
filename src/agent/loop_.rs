@@ -363,6 +363,88 @@ pub(crate) struct NonCliApprovalContext {
     pub prompt_tx: tokio::sync::mpsc::UnboundedSender<NonCliApprovalPrompt>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ActiveRunSteeringMessage {
+    pub channel: String,
+    pub sender: String,
+    pub reply_target: String,
+    pub content: String,
+    pub timestamp: u64,
+    pub thread_ts: Option<String>,
+}
+
+impl ActiveRunSteeringMessage {
+    fn render_user_interjection(&self) -> String {
+        format!(
+            "<user_interjection>\n\
+             The user sent this message while you were working. It updates the current request.\n\
+             Do not restart completed work. Incorporate it after the current tool result and before deciding the next action.\n\n\
+             <source channel=\"{}\" sender=\"{}\" reply_target=\"{}\" timestamp=\"{}\"{} />\n\
+             <message>\n{}\n</message>\n\
+             </user_interjection>",
+            self.channel,
+            self.sender,
+            self.reply_target,
+            self.timestamp,
+            self.thread_ts
+                .as_deref()
+                .map(|thread| format!(" thread_ts=\"{thread}\""))
+                .unwrap_or_default(),
+            self.content
+        )
+    }
+}
+
+type ActiveRunSteeringReceiver =
+    Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<ActiveRunSteeringMessage>>>;
+
+tokio::task_local! {
+    static TOOL_LOOP_STEERING_RX: Option<ActiveRunSteeringReceiver>;
+}
+
+pub(crate) async fn scope_active_run_steering<F, T>(
+    rx: tokio::sync::mpsc::Receiver<ActiveRunSteeringMessage>,
+    future: F,
+) -> T
+where
+    F: Future<Output = T>,
+{
+    TOOL_LOOP_STEERING_RX
+        .scope(Some(Arc::new(tokio::sync::Mutex::new(rx))), future)
+        .await
+}
+
+async fn drain_active_run_steering() -> Vec<ActiveRunSteeringMessage> {
+    let Some(rx) = TOOL_LOOP_STEERING_RX.try_with(Clone::clone).ok().flatten() else {
+        return Vec::new();
+    };
+
+    let mut guard = rx.lock().await;
+    let mut messages = Vec::new();
+    while let Ok(message) = guard.try_recv() {
+        messages.push(message);
+    }
+    messages
+}
+
+fn append_active_run_steering(
+    history: &mut Vec<ChatMessage>,
+    request_messages: Option<&mut Vec<ChatMessage>>,
+    messages: Vec<ActiveRunSteeringMessage>,
+) -> usize {
+    let mut count = 0;
+    let mut request_messages = request_messages;
+    for message in messages {
+        let rendered = message.render_user_interjection();
+        history.push(ChatMessage::user(rendered.clone()));
+        if let Some(request_messages) = request_messages.as_deref_mut() {
+            request_messages.push(ChatMessage::user(rendered));
+        }
+        count += 1;
+    }
+    count
+}
+
 tokio::task_local! {
     static TOOL_LOOP_NON_CLI_APPROVAL_CONTEXT: Option<NonCliApprovalContext>;
     static LOOP_DETECTION_CONFIG: LoopDetectionConfig;
@@ -1289,6 +1371,9 @@ pub async fn run_tool_call_loop(
             request_messages.push(ChatMessage::user(prompt));
         }
 
+        let steered_messages = drain_active_run_steering().await;
+        append_active_run_steering(history, Some(&mut request_messages), steered_messages);
+
         // ── Safety heartbeat: periodic security-constraint re-injection ──
         if let Some(ref hb) = heartbeat_config {
             if should_inject_safety_heartbeat(iteration, hb.interval) {
@@ -1989,6 +2074,13 @@ pub async fn run_tool_call_loop(
                     "text": redact_trace_text(&display_text),
                 }),
             );
+            let final_steering = drain_active_run_steering().await;
+            if !final_steering.is_empty() {
+                history.push(ChatMessage::assistant(response_text.clone()));
+                append_active_run_steering(history, None, final_steering);
+                continue;
+            }
+
             // No tool calls — this is the final response.
             // If a streaming sender is provided, relay the text in small chunks
             // so the channel can progressively update the draft message.
