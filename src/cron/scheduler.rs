@@ -225,9 +225,17 @@ async fn persist_job_result(
 ) -> bool {
     let duration_ms = (finished_at - started_at).num_milliseconds();
 
+    if success && matches!(job.job_type, JobType::Agent) && output.trim().is_empty() {
+        success = false;
+        tracing::warn!(
+            job_id = job.id.as_str(),
+            "Cron agent job produced empty output; marking run as failed"
+        );
+    }
+
     if let Err(e) = deliver_if_configured(config, job, output).await {
         if job.delivery.best_effort {
-            tracing::warn!("Cron delivery failed (best_effort): {e}");
+            tracing::warn!("Cron delivery failed (best_effort, preserving job success): {e}");
         } else {
             success = false;
             tracing::warn!("Cron delivery failed: {e}");
@@ -305,12 +313,13 @@ fn warn_if_high_frequency_agent_job(job: &CronJob) {
 
 async fn deliver_if_configured(config: &Config, job: &CronJob, output: &str) -> Result<()> {
     let delivery: &DeliveryConfig = &job.delivery;
-    if !delivery.mode.eq_ignore_ascii_case("announce") {
+    let mode = delivery.mode.trim();
+    if mode.is_empty() || mode.eq_ignore_ascii_case("none") {
         return Ok(());
     }
     if is_no_reply_sentinel(output) {
         tracing::debug!(
-            "Cron job '{}' returned NO_REPLY sentinel; skipping announce delivery",
+            "Cron job '{}' returned NO_REPLY sentinel; skipping delivery",
             job.id
         );
         return Ok(());
@@ -319,13 +328,50 @@ async fn deliver_if_configured(config: &Config, job: &CronJob, output: &str) -> 
     let channel = delivery
         .channel
         .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("delivery.channel is required for announce mode"))?;
+        .ok_or_else(|| anyhow::anyhow!("delivery.channel is required for {mode} mode"))?;
     let target = delivery
         .to
         .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("delivery.to is required for announce mode"))?;
+        .ok_or_else(|| anyhow::anyhow!("delivery.to is required for {mode} mode"))?;
 
-    deliver_announcement(config, channel, target, output).await
+    if mode.eq_ignore_ascii_case("announce") {
+        return deliver_announcement(config, channel, target, output).await;
+    }
+
+    if mode.eq_ignore_ascii_case("agent") || mode.eq_ignore_ascii_case("agent/relay") {
+        let relay_output = relay_delivery_via_agent(config, job, output).await?;
+        if relay_output.trim().is_empty() {
+            anyhow::bail!("agent relay produced empty output");
+        }
+        return deliver_announcement(config, channel, target, &relay_output).await;
+    }
+
+    anyhow::bail!("unsupported delivery mode: {mode}")
+}
+
+async fn relay_delivery_via_agent(config: &Config, job: &CronJob, output: &str) -> Result<String> {
+    let name = job.name.clone().unwrap_or_else(|| job.id.clone());
+    let prompt = format!(
+        "[cron-delivery:{} {name}] A scheduled job completed and produced the output below. \
+Rewrite it as the concise user-facing message that should be sent to the user. \
+Do not mention internal cron delivery mechanics. If there is nothing useful to tell the user, reply exactly NO_REPLY.\n\n{output}",
+        job.id
+    );
+    let relay = Box::pin(crate::agent::run(
+        config.clone(),
+        Some(prompt),
+        None,
+        job.model.clone(),
+        config.default_temperature,
+        vec![],
+        false,
+        None,
+    ))
+    .await?;
+    if is_no_reply_sentinel(&relay) {
+        return Ok(String::new());
+    }
+    Ok(relay)
 }
 
 pub(crate) async fn deliver_announcement(
@@ -1202,7 +1248,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persist_job_result_delivery_failure_best_effort_keeps_success() {
+    async fn persist_job_result_delivery_failure_best_effort_preserves_success() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(&tmp).await;
         let job = cron::add_agent_job(
@@ -1240,14 +1286,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn persist_job_result_empty_agent_output_marks_error() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp).await;
+        let job = cron::add_agent_job(
+            &config,
+            Some("empty-agent-output".into()),
+            crate::cron::Schedule::Cron {
+                expr: "*/5 * * * *".into(),
+                tz: None,
+            },
+            "produce a response",
+            SessionTarget::Isolated,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        let started = Utc::now();
+        let finished = started + ChronoDuration::milliseconds(10);
+
+        let success = persist_job_result(&config, &job, true, "  \n\t  ", started, finished).await;
+        assert!(!success, "empty agent output must not be persisted as ok");
+
+        let updated = cron::get_job(&config, &job.id).unwrap();
+        assert_eq!(updated.last_status.as_deref(), Some("error"));
+        assert_eq!(updated.last_output.as_deref(), Some("  \n\t  "));
+
+        let runs = cron::list_runs(&config, &job.id, 10).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].status, "error");
+        assert_eq!(runs[0].output.as_deref(), Some("  \n\t  "));
+    }
+
+    #[tokio::test]
     async fn persist_job_result_at_schedule_without_delete_after_run_is_not_deleted() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(&tmp).await;
         let at = Utc::now() + ChronoDuration::minutes(10);
         let job = cron::add_agent_job(
             &config,
-            Some("at-no-autodelete".into()),
-            crate::cron::Schedule::At { at },
+            Some("at-no-delete".into()),
+            Schedule::At { at },
             "Hello",
             SessionTarget::Isolated,
             None,
@@ -1283,6 +1363,29 @@ mod tests {
         };
         let err = deliver_if_configured(&config, &job, "x").await.unwrap_err();
         assert!(err.to_string().contains("unsupported delivery channel"));
+    }
+
+    #[tokio::test]
+    async fn deliver_if_configured_agent_relay_mode_requires_channel_target() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp).await;
+        let mut job = test_job("echo ok");
+        job.job_type = JobType::Agent;
+        job.delivery = DeliveryConfig {
+            mode: "agent/relay".into(),
+            channel: None,
+            to: Some("target".into()),
+            best_effort: false,
+        };
+
+        let err = deliver_if_configured(&config, &job, "relay me")
+            .await
+            .expect_err("agent/relay delivery mode must not be silently ignored");
+        let err_text = err.to_string();
+        assert!(
+            err_text.contains("delivery.channel is required"),
+            "unexpected error text: {err_text}"
+        );
     }
 
     #[tokio::test]

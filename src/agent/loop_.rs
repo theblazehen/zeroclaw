@@ -1959,6 +1959,23 @@ pub async fn run_tool_call_loop(
                 );
             }
 
+            if display_text.trim().is_empty() {
+                runtime_trace::record_event(
+                    "empty_final_response",
+                    Some(channel_name),
+                    Some(provider_name),
+                    Some(active_model.as_str()),
+                    Some(&turn_id),
+                    Some(false),
+                    Some("model produced no visible final response"),
+                    serde_json::json!({
+                        "iteration": iteration + 1,
+                        "raw_response": redact_trace_text(&response_text),
+                    }),
+                );
+                anyhow::bail!("Model produced no visible final response");
+            }
+
             runtime_trace::record_event(
                 "turn_final_response",
                 Some(channel_name),
@@ -5197,6 +5214,44 @@ mod tests {
                 .iter()
                 .all(|msg| !(msg.role == "user" && msg.content.starts_with("[Tool results]"))),
             "native mode should use role=tool history instead of prompt fallback wrapper"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_tool_call_loop_errors_on_empty_final_response_without_tool_calls() {
+        let provider = ScriptedProvider::from_text_responses(vec!["   \n\t  "]);
+        let tools_registry: Vec<Box<dyn Tool>> = Vec::new();
+        let mut history = vec![
+            ChatMessage::system("test-system"),
+            ChatMessage::user("give me a final answer"),
+        ];
+        let observer = NoopObserver;
+
+        let err = run_tool_call_loop(
+            &provider,
+            &mut history,
+            &tools_registry,
+            &observer,
+            "mock-provider",
+            "mock-model",
+            0.0,
+            true,
+            None,
+            "cli",
+            &crate::config::MultimodalConfig::default(),
+            5,
+            None,
+            None,
+            None,
+            &[],
+        )
+        .await
+        .expect_err("empty final model response without tool calls should fail");
+
+        let err_text = err.to_string();
+        assert!(
+            err_text.contains("no visible final response"),
+            "unexpected error text: {err_text}"
         );
     }
 
