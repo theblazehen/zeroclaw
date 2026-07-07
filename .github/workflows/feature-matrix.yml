@@ -3,40 +3,7 @@ name: Feature Matrix
 # Non-default feature lanes moved to nightly/weekly only per CI/CD optimization PRD.
 # PR path only runs default lane via ci:full/ci:feature-matrix labels.
 on:
-    push:
-        branches: [dev]
-        paths:
-            - "Cargo.toml"
-            - "Cargo.lock"
-            - "src/**"
-            - "crates/**"
-            - "scripts/ci/nightly_matrix_report.py"
-            - ".github/release/nightly-owner-routing.json"
-            - ".github/workflows/feature-matrix.yml"
-    pull_request:
-        branches: [dev, main]
-        types: [labeled]
-    merge_group:
-        branches: [dev, main]
-    schedule:
-        - cron: "30 4 * * 1" # Weekly Monday 04:30 UTC
-        - cron: "15 3 * * *" # Daily 03:15 UTC (nightly profile)
     workflow_dispatch:
-        inputs:
-            profile:
-                description: "compile = merge-gate matrix, nightly = integration-oriented lane commands"
-                required: true
-                default: compile
-                type: choice
-                options:
-                    - compile
-                    - nightly
-            fail_on_failure:
-                description: "Fail summary job when any lane fails"
-                required: true
-                default: true
-                type: boolean
-
 concurrency:
     group: feature-matrix-${{ github.event.pull_request.number || github.ref || github.run_id }}-${{ github.event.inputs.profile || 'auto' }}
     cancel-in-progress: true

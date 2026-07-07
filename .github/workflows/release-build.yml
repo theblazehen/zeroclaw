@@ -8,7 +8,7 @@ on:
 
 concurrency:
     group: production-release-build-${{ github.ref || github.run_id }}
-    cancel-in-progress: false
+    cancel-in-progress: true
 
 permissions:
     contents: read

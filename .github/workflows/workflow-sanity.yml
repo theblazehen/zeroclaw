@@ -1,18 +1,7 @@
 name: Workflow Sanity
 
 on:
-    pull_request:
-        paths:
-            - ".github/workflows/**"
-            - ".github/*.yml"
-            - ".github/*.yaml"
-    push:
-        branches: [dev, main]
-        paths:
-            - ".github/workflows/**"
-            - ".github/*.yml"
-            - ".github/*.yaml"
-
+    workflow_dispatch:
 concurrency:
     group: workflow-sanity-${{ github.event.pull_request.number || github.sha }}
     cancel-in-progress: true

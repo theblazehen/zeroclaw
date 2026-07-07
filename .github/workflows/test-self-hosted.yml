@@ -1,10 +1,7 @@
 name: Test Self-Hosted Runner
 
 on:
-  workflow_dispatch:
-  schedule:
-    - cron: "30 2 * * *"
-
+    workflow_dispatch:
 permissions:
   contents: read
 

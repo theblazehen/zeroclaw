@@ -1,16 +1,7 @@
 name: Deploy GitHub Pages
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - site/**
-      - docs/**
-      - README.md
-      - .github/workflows/pages-deploy.yml
-  workflow_dispatch:
-
+    workflow_dispatch:
 permissions:
   contents: read
   pages: write

@@ -1,10 +1,7 @@
 name: PR Check Status
 
 on:
-  schedule:
-    - cron: "15 8 * * *" # Once daily at 8:15am UTC
-  workflow_dispatch:
-
+    workflow_dispatch:
 permissions: {}
 
 concurrency:

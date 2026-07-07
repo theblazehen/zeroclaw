@@ -1,10 +1,7 @@
 name: PR Check Stale
 
 on:
-    schedule:
-        - cron: "20 2 * * *"
     workflow_dispatch:
-
 permissions: {}
 
 env:

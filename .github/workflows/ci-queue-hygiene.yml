@@ -1,31 +1,7 @@
 name: CI Queue Hygiene
 
 on:
-    schedule:
-        - cron: "*/5 * * * *"
     workflow_dispatch:
-        inputs:
-            apply:
-                description: "Cancel selected queued runs (false = dry-run report only)"
-                required: true
-                default: false
-                type: boolean
-            status:
-                description: "Queued-run status scope"
-                required: true
-                default: queued
-                type: choice
-                options:
-                    - queued
-                    - in_progress
-                    - requested
-                    - waiting
-            max_cancel:
-                description: "Maximum runs to cancel in one execution"
-                required: true
-                default: "120"
-                type: string
-
 concurrency:
     group: ci-queue-hygiene
     cancel-in-progress: false

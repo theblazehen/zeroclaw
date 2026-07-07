@@ -1,32 +1,7 @@
 name: Pub Pre-release
 
 on:
-    push:
-        tags:
-            - "v*-alpha.*"
-            - "v*-beta.*"
-            - "v*-rc.*"
     workflow_dispatch:
-        inputs:
-            tag:
-                description: "Existing pre-release tag (e.g. v0.1.8-rc.1)"
-                required: true
-                default: ""
-                type: string
-            mode:
-                description: "dry-run validates/builds only; publish creates prerelease"
-                required: true
-                default: dry-run
-                type: choice
-                options:
-                    - dry-run
-                    - publish
-            draft:
-                description: "Create prerelease as draft"
-                required: true
-                default: true
-                type: boolean
-
 concurrency:
     group: prerelease-${{ github.ref || github.run_id }}
     cancel-in-progress: false

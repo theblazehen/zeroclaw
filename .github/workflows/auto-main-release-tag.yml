@@ -1,11 +1,7 @@
 name: Auto Main Release Tag
 
 on:
-  workflow_run:
-    workflows: ["Production Release Build"]
-    types: [completed]
-    branches: [main]
-
+    workflow_dispatch:
 concurrency:
   group: auto-main-release-tag
   cancel-in-progress: false

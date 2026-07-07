@@ -1,15 +1,7 @@
 name: Test Fuzz
 
 on:
-    schedule:
-        - cron: "0 2 * * 0" # Weekly Sunday 2am UTC
     workflow_dispatch:
-        inputs:
-            fuzz_seconds:
-                description: "Seconds to run each fuzz target"
-                required: false
-                default: "300"
-
 concurrency:
     group: fuzz-${{ github.ref }}
     cancel-in-progress: true

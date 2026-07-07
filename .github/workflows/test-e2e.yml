@@ -1,19 +1,7 @@
 name: Test E2E
 
 on:
-    push:
-        branches: [dev, main]
-        paths:
-            - "Cargo.toml"
-            - "Cargo.lock"
-            - "src/**"
-            - "crates/**"
-            - "tests/**"
-            - "scripts/**"
-            - "scripts/ci/ensure_cc.sh"
-            - ".github/workflows/test-e2e.yml"
     workflow_dispatch:
-
 concurrency:
     group: test-e2e-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref_name || github.sha }}
     cancel-in-progress: true

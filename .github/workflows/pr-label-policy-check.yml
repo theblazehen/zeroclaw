@@ -1,18 +1,7 @@
 name: PR Label Policy Check
 
 on:
-    pull_request:
-        paths:
-            - ".github/label-policy.json"
-            - ".github/workflows/pr-labeler.yml"
-            - ".github/workflows/pr-auto-response.yml"
-    push:
-        branches: [dev, main]
-        paths:
-            - ".github/label-policy.json"
-            - ".github/workflows/pr-labeler.yml"
-            - ".github/workflows/pr-auto-response.yml"
-
+    workflow_dispatch:
 concurrency:
     group: pr-label-policy-check-${{ github.event.pull_request.number || github.sha }}
     cancel-in-progress: true

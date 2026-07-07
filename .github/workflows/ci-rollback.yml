@@ -2,51 +2,6 @@ name: CI Rollback Guard
 
 on:
     workflow_dispatch:
-        inputs:
-            branch:
-                description: "Integration branch this rollback targets"
-                required: true
-                default: dev
-                type: choice
-                options:
-                    - dev
-                    - main
-            mode:
-                description: "dry-run only plans; execute enables rollback marker/dispatch actions"
-                required: true
-                default: dry-run
-                type: choice
-                options:
-                    - dry-run
-                    - execute
-            target_ref:
-                description: "Optional explicit rollback target (tag/sha/ref). Empty = latest matching tag."
-                required: false
-                default: ""
-                type: string
-            allow_non_ancestor:
-                description: "Allow target not being ancestor of current head (warning-only)"
-                required: true
-                default: false
-                type: boolean
-            fail_on_violation:
-                description: "Fail workflow when guard violations are detected"
-                required: true
-                default: true
-                type: boolean
-            create_marker_tag:
-                description: "In execute mode, create and push rollback marker tag"
-                required: true
-                default: false
-                type: boolean
-            emit_repository_dispatch:
-                description: "In execute mode, emit repository_dispatch event `rollback_execute`"
-                required: true
-                default: false
-                type: boolean
-    schedule:
-        - cron: "15 7 * * 1" # Weekly Monday 07:15 UTC
-
 concurrency:
     group: ci-rollback-${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.branch || 'dev') || github.ref_name }}
     cancel-in-progress: false

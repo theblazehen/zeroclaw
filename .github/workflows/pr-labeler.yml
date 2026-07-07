@@ -1,20 +1,7 @@
 name: PR Labeler
 
 on:
-    pull_request_target:
-        branches: [dev, main]
-        types: [opened, reopened, synchronize, ready_for_review]
     workflow_dispatch:
-        inputs:
-            mode:
-                description: "Run mode for managed-label governance"
-                required: true
-                default: "audit"
-                type: choice
-                options:
-                    - audit
-                    - repair
-
 concurrency:
     group: pr-labeler-${{ github.event.pull_request.number || github.run_id }}
     cancel-in-progress: true

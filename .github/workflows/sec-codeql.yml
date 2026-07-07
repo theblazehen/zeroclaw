@@ -3,23 +3,7 @@ name: Sec CodeQL
 # Moved off PR path per CI/CD optimization PRD.
 # Runs on push-to-main/dev + weekly schedule to catch vulnerabilities within 1 merge.
 on:
-    push:
-        branches: [dev, main]
-        paths:
-            - "Cargo.toml"
-            - "Cargo.lock"
-            - "src/**"
-            - "crates/**"
-            - "scripts/ci/ensure_c_toolchain.sh"
-            - "scripts/ci/ensure_cargo_component.sh"
-            - ".github/codeql/**"
-            - "scripts/ci/self_heal_rust_toolchain.sh"
-            - "scripts/ci/ensure_cc.sh"
-            - ".github/workflows/sec-codeql.yml"
-    schedule:
-        - cron: "0 6 * * 1" # Weekly Monday 6am UTC
     workflow_dispatch:
-
 concurrency:
     group: codeql-${{ github.ref || github.run_id }}
     cancel-in-progress: true

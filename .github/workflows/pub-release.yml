@@ -1,34 +1,7 @@
 name: Pub Release
 
 on:
-    push:
-        tags: ["v*"]
     workflow_dispatch:
-        inputs:
-            release_ref:
-                description: "Git ref (branch, tag, or SHA) to build"
-                required: false
-                default: "main"
-                type: string
-            publish_release:
-                description: "Publish a GitHub release (false = verification build only)"
-                required: false
-                default: false
-                type: boolean
-            release_tag:
-                description: "Existing release tag (required when publish_release=true), e.g. v0.1.1"
-                required: false
-                default: ""
-                type: string
-            draft:
-                description: "Create release as draft (manual publish only)"
-                required: false
-                default: true
-                type: boolean
-    schedule:
-        # Weekly release-readiness verification on default branch (no publish)
-        - cron: "17 8 * * 1"
-
 concurrency:
     group: release-${{ github.ref || github.run_id }}
     cancel-in-progress: false

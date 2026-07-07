@@ -1,45 +1,7 @@
 name: Docs Deploy
 
 on:
-    pull_request:
-        branches: [dev, main]
-        paths:
-            - "docs/**"
-            - "README*.md"
-            - ".github/workflows/docs-deploy.yml"
-            - "scripts/ci/docs_quality_gate.sh"
-            - "scripts/ci/collect_changed_links.py"
-            - ".github/release/docs-deploy-policy.json"
-            - "scripts/ci/docs_deploy_guard.py"
-    push:
-        branches: [dev, main]
-        paths:
-            - "docs/**"
-            - "README*.md"
-            - ".github/workflows/docs-deploy.yml"
-            - "scripts/ci/docs_quality_gate.sh"
-            - "scripts/ci/collect_changed_links.py"
-            - ".github/release/docs-deploy-policy.json"
-            - "scripts/ci/docs_deploy_guard.py"
     workflow_dispatch:
-        inputs:
-            deploy_target:
-                description: "preview uploads artifact only; production deploys to Pages"
-                required: true
-                default: preview
-                type: choice
-                options:
-                    - preview
-                    - production
-            preview_evidence_run_url:
-                description: "Required for manual production deploys when policy enforces preview promotion evidence"
-                required: false
-                default: ""
-            rollback_ref:
-                description: "Optional rollback source ref (tag/sha/ref) for manual production dispatch"
-                required: false
-                default: ""
-
 concurrency:
     group: docs-deploy-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref_name || github.sha }}
     cancel-in-progress: true

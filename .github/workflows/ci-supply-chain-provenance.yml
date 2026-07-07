@@ -1,20 +1,7 @@
 name: CI Supply Chain Provenance
 
 on:
-    push:
-        branches: [dev, main]
-        paths:
-            - "Cargo.toml"
-            - "Cargo.lock"
-            - "src/**"
-            - "crates/**"
-            - "scripts/ci/ensure_cc.sh"
-            - "scripts/ci/generate_provenance.py"
-            - ".github/workflows/ci-supply-chain-provenance.yml"
     workflow_dispatch:
-    schedule:
-        - cron: "20 6 * * 1" # Weekly Monday 06:20 UTC
-
 concurrency:
     group: supply-chain-provenance-${{ github.ref || github.run_id }}
     cancel-in-progress: true

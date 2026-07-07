@@ -1,28 +1,7 @@
 name: Pub Docker Img
 
 on:
-    push:
-        tags: ["v*"]
-    pull_request:
-        branches: [dev, main]
-        paths:
-            - "Dockerfile"
-            - ".dockerignore"
-            - "docker-compose.yml"
-            - "rust-toolchain.toml"
-            - "dev/config.template.toml"
-            - ".github/workflows/pub-docker-img.yml"
-            - ".github/release/ghcr-tag-policy.json"
-            - ".github/release/ghcr-vulnerability-policy.json"
-            - "scripts/ci/ghcr_publish_contract_guard.py"
-            - "scripts/ci/ghcr_vulnerability_gate.py"
     workflow_dispatch:
-        inputs:
-            release_tag:
-                description: "Existing release tag to publish (e.g. v0.2.0). Leave empty for smoke-only run."
-                required: false
-                type: string
-
 concurrency:
     group: docker-${{ github.event.pull_request.number || github.ref }}
     cancel-in-progress: true
