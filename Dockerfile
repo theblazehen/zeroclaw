@@ -44,6 +44,7 @@ RUN rm -rf src benches crates/robot-kit/src crates/zeroclaw-types/src crates/zer
 COPY src/ src/
 COPY benches/ benches/
 COPY crates/ crates/
+COPY data/ data/
 COPY firmware/ firmware/
 COPY templates/ templates/
 COPY web/ web/
