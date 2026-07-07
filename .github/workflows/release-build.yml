@@ -12,6 +12,7 @@ concurrency:
 
 permissions:
     contents: read
+    packages: write
 
 env:
     GIT_CONFIG_COUNT: "1"
@@ -101,3 +102,51 @@ jobs:
                       artifacts/zeroclaw.sha256
                   if-no-files-found: error
                   retention-days: 21
+
+    publish-debian-image:
+        name: Build and Push Debian Image
+        if: github.repository == 'theblazehen/zeroclaw' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        needs: [build-and-test]
+        runs-on: [self-hosted, Linux, X64, aws-india, blacksmith-2vcpu-ubuntu-2404]
+        timeout-minutes: 90
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+            - name: Resolve Docker API version
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  server_api="$(docker version --format '{{.Server.APIVersion}}')"
+                  min_api="$(docker version --format '{{.Server.MinAPIVersion}}' 2>/dev/null || true)"
+                  if [[ -z "${server_api}" || "${server_api}" == "<no value>" ]]; then
+                    echo "::error::Unable to detect Docker server API version."
+                    docker version || true
+                    exit 1
+                  fi
+                  echo "DOCKER_API_VERSION=${server_api}" >> "$GITHUB_ENV"
+                  echo "Using Docker API version ${server_api} (server min: ${min_api:-unknown})"
+
+            - name: Setup Buildx
+              uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+            - name: Log in to Container Registry
+              uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+              with:
+                  registry: ghcr.io
+                  username: ${{ github.actor }}
+                  password: ${{ secrets.GITHUB_TOKEN }}
+
+            - name: Build and push Debian image
+              uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+              with:
+                  context: .
+                  target: dev
+                  push: true
+                  build-args: |
+                      ZEROCLAW_CARGO_ALL_FEATURES=true
+                  tags: ghcr.io/theblazehen/zeroclaw:debian
+                  platforms: linux/amd64
+                  cache-from: type=gha
+                  cache-to: type=gha,mode=max
